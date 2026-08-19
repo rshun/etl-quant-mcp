@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：FastMCP 入口，注册 ETL 执行、任务管理与自省 Tool
+#   2026-08-19  Claude  新增日志类 Tool：list_etl_logs / read_etl_log / summarize_etl_log
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -18,6 +19,7 @@ spring 改了枚举或删了参数，这里会立刻报错而不是默默拼出�
 """
 import sys
 
+import logs as logs_mod
 import params
 import runner as runner_mod
 import schema
@@ -322,6 +324,66 @@ def cancel_job(job_id: str, force: bool = False) -> dict:
     try:
         return {"ok": True, **_view(get_runner().cancel(job_id, force=force))}
     except runner_mod.JobNotFound as e:
+        return _error(str(e))
+
+
+# ---------------------------------------------------------------- 日志类 Tool
+
+@mcp.tool()
+def list_etl_logs(limit: int = 30) -> dict:
+    """列出已有的 ETL 日志文件（日期、大小、修改时间），最新在前。
+
+    一天一个文件，当天所有 ETL 程序共用。想复盘某晚的运行先用它找到日期。
+    """
+    try:
+        records = logs_mod.list_logs(limit=limit)
+    except RuntimeError as e:          # 环境变量未配置
+        return _error(str(e))
+    return {"ok": True, "count": len(records), "logs": records}
+
+
+@mcp.tool()
+def read_etl_log(
+    date: str | None = None,
+    tail: int = 200,
+    level: str | None = None,
+    module: str | None = None,
+    keyword: str | None = None,
+    max_bytes: int = logs_mod.DEFAULT_MAX_BYTES,
+) -> dict:
+    """读取某天 ETL 日志的尾部，可按级别 / 模块 / 关键字过滤。
+
+    date 省略为当天（YYYYMMDD）。level 精确匹配（ERROR/WARNING/INFO...），
+    module 子串匹配（'import_daily' 可匹配 'etl.import_daily'），keyword 匹配整行。
+    只读文件尾部 max_bytes，超出会标记 truncated，避免超大日志灌爆上下文。
+    """
+    try:
+        return {"ok": True, **logs_mod.read_log(
+            date, tail=tail, level=level, module=module,
+            keyword=keyword, max_bytes=max_bytes)}
+    except logs_mod.LogNotFound as e:
+        return _error(str(e), hint="用 list_etl_logs 看有哪些日期的日志")
+    except (ValueError, RuntimeError) as e:
+        return _error(str(e))
+
+
+@mcp.tool()
+def summarize_etl_log(date: str | None = None) -> dict:
+    """摘要某天的 ETL 日志：级别计数、按模块分组、错误样本，以及**卡死线索**。
+
+    重点看 `stall_suspects`：某个模块的最后一行如果是进度行（形如「已处理: 3400/5400」），
+    说明它停在下载途中就没了下文——正常跑完会有「批量采集完成」，正常失败会有 ERROR，
+    两者皆无而止于进度行，就是卡死后被 kill（或至今仍挂着）的典型形态。
+    该判据与查看时间无关，隔几天复盘同样成立。
+
+    这与 get_job 的心跳互补：心跳只看得见本服务启动的任务，
+    cron 昨晚那一次只能靠日志复盘。
+    """
+    try:
+        return {"ok": True, **logs_mod.summarize_log(date)}
+    except logs_mod.LogNotFound as e:
+        return _error(str(e), hint="用 list_etl_logs 看有哪些日期的日志")
+    except (ValueError, RuntimeError) as e:
         return _error(str(e))
 
 

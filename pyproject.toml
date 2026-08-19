@@ -18,9 +18,8 @@ dependencies = [
 [project.scripts]
 etl-quant-mcp = "server:main"
 
-# logs.py 属 M3，创建后加入本列表
 [tool.setuptools]
-py-modules = ["server", "schema", "params", "runner"]
+py-modules = ["server", "schema", "params", "runner", "logs"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

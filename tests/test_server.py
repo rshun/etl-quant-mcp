@@ -49,6 +49,7 @@ def _harmless(code: str = "print('ok')") -> list[str]:
 EXPECTED_TOOLS = {
     "etl_import_daily", "etl_adjust", "etl_fetch_index", "etl_fill_indicators",
     "list_jobs", "get_job", "get_job_output", "cancel_job",
+    "list_etl_logs", "read_etl_log", "summarize_etl_log",
     "describe_etl_program",
 }
 
@@ -320,3 +321,68 @@ def test_describe_unknown_program_rejected(live_runner):
     result = server.describe_etl_program("rm_rf")
     assert result["ok"] is False
     assert "未知程序" in result["error"]
+
+
+# ── 日志类 Tool ───────────────────────────────────────────────────────────────
+
+_STALLED_LOG = """\
+02:00:00 [etl.adjust] [INFO] 获取股票复权因子任务启动
+02:00:40 [etl.datasource.bstock] [INFO]    已处理: 100/5400
+02:09:00 [etl.datasource.bstock] [INFO]    已处理: 300/5400
+"""
+
+
+@pytest.fixture
+def etl_log_dir(tmp_path, monkeypatch):
+    """把日志目录指向临时目录，不碰真实 spring。"""
+    directory = tmp_path / "log"
+    directory.mkdir()
+    monkeypatch.setenv("SPRING_LOG_DIR", str(directory))
+    return directory
+
+
+def test_list_etl_logs(etl_log_dir):
+    """正例: 列出日志文件"""
+    (etl_log_dir / "stockdaily20260819.log").write_text(_STALLED_LOG, encoding="utf-8")
+    result = server.list_etl_logs()
+    assert result["ok"] is True
+    assert [l["date"] for l in result["logs"]] == ["20260819"]
+
+
+def test_read_etl_log_with_filter(etl_log_dir):
+    """正例: 按关键字过滤"""
+    (etl_log_dir / "stockdaily20260819.log").write_text(_STALLED_LOG, encoding="utf-8")
+    result = server.read_etl_log(date="20260819", keyword="已处理")
+    assert result["ok"] is True
+    assert result["matched_lines"] == 2
+
+
+def test_read_etl_log_missing_file_returns_hint(etl_log_dir):
+    """反例: 文件不存在时返回结构化错误并提示下一步，不抛裸异常"""
+    result = server.read_etl_log(date="20990101")
+    assert result["ok"] is False
+    assert "日志文件不存在" in result["error"]
+    assert "list_etl_logs" in result["hint"]
+
+
+def test_read_etl_log_invalid_date_returns_error(etl_log_dir):
+    """反例: 日期格式非法"""
+    result = server.read_etl_log(date="2026-13")
+    assert result["ok"] is False
+    assert "日期格式非法" in result["error"]
+
+
+def test_summarize_etl_log_surfaces_stall_suspect(etl_log_dir):
+    """正例(核心): 摘要要能指出「停在下载处」的模块"""
+    (etl_log_dir / "stockdaily20260819.log").write_text(_STALLED_LOG, encoding="utf-8")
+    result = server.summarize_etl_log(date="20260819")
+    assert result["ok"] is True
+    assert [s["module"] for s in result["stall_suspects"]] == ["etl.datasource.bstock"]
+    assert result["stall_suspects"][0]["progress"]["done"] == 300
+
+
+def test_summarize_etl_log_missing_file_returns_hint(etl_log_dir):
+    """反例: 文件不存在"""
+    result = server.summarize_etl_log(date="20990101")
+    assert result["ok"] is False
+    assert "list_etl_logs" in result["hint"]
