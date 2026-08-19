@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：子进程调度 + 心跳监控 + 串行队列 + 状态持久化 + 取消
+#   2026-08-19  Claude  新增失败自动重试与批次查询，支撑分片断点续跑
 """ETL 子进程执行器。
 
 设计要点（对应文档 ADR-2/3/6 与第五节）：
@@ -45,13 +46,16 @@ class Job:
 
     def __init__(self, job_id: str, program: str, argv: list[str],
                  stall_timeout: int, max_runtime: int,
-                 meta: dict | None = None):
+                 meta: dict | None = None, retries: int = 0):
         self.job_id = job_id
         self.program = program
         self.argv = list(argv)
         self.stall_timeout = stall_timeout
         self.max_runtime = max_runtime
         self.meta = dict(meta or {})
+        self.attempt = 1
+        self.max_attempts = max(1, retries + 1)
+        self.attempt_history: list[dict] = []
 
         self.status = schema.STATUS_QUEUED
         self.created_at = time.time()
@@ -104,6 +108,9 @@ class Job:
             "line_count": self.line_count,
             "progress": self.progress,
             "queue_position": queue_position,
+            "attempt": self.attempt,
+            "max_attempts": self.max_attempts,
+            "attempt_history": self.attempt_history,
             "error": self.error,
             "argv": self.argv,
             "meta": self.meta,
@@ -166,7 +173,8 @@ class Runner:
     def submit(self, program: str, argv: list[str], *,
                stall_timeout: int | None = None,
                max_runtime: int | None = None,
-               meta: dict | None = None) -> str:
+               meta: dict | None = None,
+               retries: int = 0) -> str:
         job_id = f"{program}-{datetime.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:6]}"
         job = Job(
             job_id=job_id,
@@ -177,6 +185,7 @@ class Runner:
             max_runtime=max_runtime if max_runtime is not None
                         else schema.max_runtime_default(),
             meta=meta,
+            retries=retries,
         )
         with self._lock:
             self._jobs[job_id] = job
@@ -338,11 +347,27 @@ class Runner:
         code = proc.poll()
         with self._lock:
             job.exit_code = code
-            job.finished_at = time.time()
-            if job.status not in (schema.STATUS_CANCELLED, schema.STATUS_KILLED_STALLED):
-                job.status = schema.status_from_exit_code(code if code is not None else -1)
-            job._done.set()
+            if job.status in (schema.STATUS_CANCELLED, schema.STATUS_KILLED_STALLED):
+                outcome = job.status
+            else:
+                outcome = schema.status_from_exit_code(code if code is not None else -1)
+
+            # 判定与状态落定必须在同一把锁里一次做完。分开做会留下一个窗口，
+            # 让 wait() 或 get_job() 看到一个「其实还要再跑」的终态——
+            # 对模型来说那就是任务已经失败了，会据此做出错误决策。
+            should_retry = (outcome in schema.RETRYABLE_STATUSES
+                            and job.attempt < job.max_attempts)
+            if should_retry:
+                self._reset_for_retry_locked(job, outcome)
+            else:
+                job.status = outcome
+                job.finished_at = time.time()
+                job._done.set()
         self._persist(job)
+        if should_retry:
+            # 重排到队尾而非插队：串行队列里其他任务不该被一个反复失败的任务饿死；
+            # 对分片批次而言，坏的那一段挪到最后重试也更合理。
+            self._queue.put(job.job_id)
 
     def _read_output(self, job: Job, proc: subprocess.Popen, out_path: Path) -> None:
         """逐行读取并打时间戳。这是心跳的唯一来源。"""
@@ -424,6 +449,43 @@ class Runner:
                 proc.wait(timeout=self._terminate_grace)
             except Exception:                       # noqa: BLE001
                 pass
+
+    def _reset_for_retry_locked(self, job: Job, outcome: str) -> None:
+        """记录本次尝试的结果并把任务重置回排队态。调用方必须已持有锁。
+
+        状态直接从「跑完」跳到 queued，中间**不经过终态**——对外永远看不到
+        一个还要再跑的任务被标成失败。上一次的结果留在 attempt_history 里。
+        """
+        job.attempt_history.append({
+            "attempt": job.attempt,
+            "status": outcome,
+            "exit_code": job.exit_code,
+            "last_line": job.last_line,
+            "error": job.error,
+        })
+        job.attempt += 1
+        job.status = schema.STATUS_QUEUED
+        job.exit_code = None
+        job.error = None
+        job.started_at = None
+        job.finished_at = None
+        job.last_line = ""
+        job.line_count = 0
+        job.progress = None
+        job._proc = None
+        job._start_mono = None
+        job._last_output_mono = None
+        self._pending.append(job.job_id)
+
+    def batch(self, batch_id: str) -> list[dict]:
+        """取出同一批次(分片)的全部任务，按提交顺序。"""
+        with self._lock:
+            ids = [j for j in self._order
+                   if self._jobs[j].meta.get("batch_id") == batch_id]
+            pending = list(self._pending)
+            return [self._jobs[j].to_dict(
+                        queue_position=pending.index(j) if j in pending else None)
+                    for j in ids]
 
     # -- 持久化 ------------------------------------------------------------
 

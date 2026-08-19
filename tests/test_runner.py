@@ -17,6 +17,8 @@ import pytest
 
 import runner as runner_mod
 import schema
+from unittest.mock import patch
+
 from runner import Runner, parse_progress
 
 PY = sys.executable
@@ -378,3 +380,143 @@ def test_wait_times_out_for_long_job(runner):
     info = runner.wait(job_id, timeout=0.5)
     assert info["status"] not in schema.TERMINAL_STATUSES
     runner.cancel(job_id, force=True)
+
+
+# ── 失败重试（M4）────────────────────────────────────────────────────────────
+# retries 是分片续跑的一半：单段失败自动再试，省掉一轮人工往返。
+
+def test_no_retry_by_default(runner):
+    """正例: 默认不重试，只跑一次"""
+    job_id = runner.submit("fake", _script("import sys; sys.exit(1)"))
+    info = _wait_terminal(runner, job_id)
+    assert info["status"] == schema.STATUS_FAILED
+    assert info["attempt"] == 1
+    assert info["attempt_history"] == []
+
+
+def test_retry_exhausts_all_attempts(runner):
+    """正例: 始终失败时跑满 retries+1 次，并留下每次的记录"""
+    job_id = runner.submit("fake", _script("import sys; sys.exit(1)"), retries=2)
+    info = _wait_terminal(runner, job_id, timeout=30)
+    assert info["status"] == schema.STATUS_FAILED
+    assert info["attempt"] == 3
+    assert info["max_attempts"] == 3
+    assert [h["attempt"] for h in info["attempt_history"]] == [1, 2]
+    assert all(h["exit_code"] == 1 for h in info["attempt_history"])
+
+
+def test_retry_succeeds_on_second_attempt(runner, run_dir):
+    """正例(核心): 第一次失败、第二次成功 → 最终状态是 succeeded"""
+    marker = run_dir / "attempt.txt"
+    code = (f"import os, sys\n"
+            f"p = {str(marker)!r}\n"
+            f"n = len(open(p).read()) if os.path.exists(p) else 0\n"
+            f"open(p, 'a').write('x')\n"
+            f"print(f'attempt {{n+1}}')\n"
+            f"sys.exit(1 if n == 0 else 0)\n")
+    job_id = runner.submit("fake", _script(code), retries=1)
+    info = _wait_terminal(runner, job_id, timeout=30)
+    assert info["status"] == schema.STATUS_SUCCEEDED
+    assert info["attempt"] == 2
+    assert len(info["attempt_history"]) == 1
+
+
+def test_wait_does_not_return_between_retries(runner):
+    """反例(关键): wait 不得在重试排队的空隙里返回，把还要再跑的任务报成最终失败"""
+    code = "import sys, time; time.sleep(0.2); sys.exit(1)"
+    job_id = runner.submit("fake", _script(code), retries=2)
+    info = runner.wait(job_id, timeout=30)
+    assert info["status"] in schema.TERMINAL_STATUSES
+    assert info["attempt"] == 3, f"wait 提前返回了，attempt={info['attempt']}"
+
+
+def test_cancelled_job_is_not_retried(runner):
+    """反例(关键): 人工取消是人的决定，不得被自动重试推翻"""
+    code = "import time; print('x'); time.sleep(30)"
+    job_id = runner.submit("fake", _script(code), retries=3,
+                           stall_timeout=30, max_runtime=60)
+    _wait_status(runner, job_id, schema.STATUS_RUNNING, timeout=10)
+    runner.cancel(job_id, force=True)
+    info = _wait_terminal(runner, job_id, timeout=15)
+    assert info["status"] == schema.STATUS_CANCELLED
+    assert info["attempt"] == 1
+
+
+def test_killed_stalled_job_is_retried(runner):
+    """正例: 卡死后被终止属于可重试——这正是断点续跑要覆盖的场景"""
+    code = "import time; print('start'); time.sleep(30)"
+    job_id = runner.submit("fake", _script(code), retries=1,
+                           stall_timeout=30, max_runtime=1)
+    info = _wait_terminal(runner, job_id, timeout=30)
+    assert info["status"] == schema.STATUS_KILLED_STALLED
+    assert info["attempt"] == 2, "被判卡死终止后应重试一次"
+
+
+def test_retry_resets_progress_state(runner):
+    """正例: 重试时进度与行数要归零，不能把上一次的残留混进来"""
+    code = ("import sys\n"
+            "print('   已处理: 7/10')\n"
+            "sys.exit(1)\n")
+    job_id = runner.submit("fake", _script(code), retries=1)
+    info = _wait_terminal(runner, job_id, timeout=30)
+    assert info["attempt"] == 2
+    assert info["line_count"] == 1, "行数应只统计最后一次尝试"
+
+
+# ── 批次查询 ──────────────────────────────────────────────────────────────────
+
+def test_batch_returns_jobs_in_submit_order(runner):
+    """正例: 同批次任务按提交顺序返回，便于对上分片区间"""
+    ids = [runner.submit("fake", _script("print('ok')"),
+                         meta={"batch_id": "B1", "segment_index": i})
+           for i in range(3)]
+    for job_id in ids:
+        _wait_terminal(runner, job_id, timeout=30)
+    assert [j["job_id"] for j in runner.batch("B1")] == ids
+
+
+def test_batch_ignores_other_batches(runner):
+    """反例: 不同批次不得串味"""
+    a = runner.submit("fake", _script("print('a')"), meta={"batch_id": "B1"})
+    b = runner.submit("fake", _script("print('b')"), meta={"batch_id": "B2"})
+    for job_id in (a, b):
+        _wait_terminal(runner, job_id, timeout=30)
+    assert [j["job_id"] for j in runner.batch("B1")] == [a]
+
+
+def test_batch_unknown_id_returns_empty(runner):
+    """反例: 未知批次返回空列表，不抛异常"""
+    assert runner.batch("nosuch") == []
+
+
+def test_retrying_job_never_publishes_terminal_status(run_dir):
+    """反例(关键竞态): 还要重试的任务，任何时刻都不得对外呈现为终态。
+
+    暴露了的话，模型调 get_job 看到 failed 就以为结束了，据此去「定向重跑」——
+    而执行器自己正要重跑，于是跑了两遍。
+
+    这里挂钩 _persist 来采样而不是轮询：真实窗口只有落盘那一瞬(约 1ms)，
+    轮询几乎必然错过，那样的测试等于没测。_persist 同时也是落盘记录的写入点，
+    因此这条断言连带覆盖了「重启后从 JSON 读到的历史状态也不能是假终态」。
+    """
+    samples: list[tuple[int, str]] = []
+    original = Runner._persist
+
+    def spy(self, job):
+        samples.append((job.attempt, job.status))
+        return original(self, job)
+
+    with patch.object(Runner, "_persist", spy):
+        r = Runner(jobs_dir=run_dir, cwd=run_dir, poll_interval=0.05,
+                   terminate_grace=1.0)
+        try:
+            job_id = r.submit("fake", _script("import sys; sys.exit(1)"), retries=2)
+            info = _wait_terminal(r, job_id, timeout=30)
+        finally:
+            r.shutdown()
+
+    assert info["attempt"] == 3
+    premature = [(a, st) for a, st in samples
+                 if a < 3 and st in schema.TERMINAL_STATUSES]
+    assert not premature, f"还要重试却已呈现为终态: {premature}"
+    assert (3, schema.STATUS_FAILED) in samples, "最终失败状态应被落盘"

@@ -9,7 +9,7 @@
 """
 import asyncio
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -50,7 +50,7 @@ EXPECTED_TOOLS = {
     "etl_import_daily", "etl_adjust", "etl_fetch_index", "etl_fill_indicators",
     "list_jobs", "get_job", "get_job_output", "cancel_job",
     "list_etl_logs", "read_etl_log", "summarize_etl_log",
-    "describe_etl_program",
+    "check_data_gaps", "describe_etl_program",
 }
 
 
@@ -386,3 +386,221 @@ def test_summarize_etl_log_missing_file_returns_hint(etl_log_dir):
     result = server.summarize_etl_log(date="20990101")
     assert result["ok"] is False
     assert "list_etl_logs" in result["hint"]
+
+
+# ── 分片执行（M4）────────────────────────────────────────────────────────────
+
+def test_chunked_run_returns_batch_shape(live_runner):
+    """正例(核心): 分片返回批次结构，逐段可见"""
+    with patch.object(params, "build_argv", return_value=_harmless()):
+        result = server.etl_import_daily(begin="20260115", end="20260320",
+                                         chunk="month", wait_seconds=30)
+    assert result["ok"] is True
+    assert result["batch_id"]
+    assert result["chunk"] == "month"
+    assert result["segment_count"] == 3
+    assert [(s["begin"], s["end"]) for s in result["segments"]] == [
+        ("20260115", "20260131"), ("20260201", "20260228"), ("20260301", "20260320")]
+    assert result["succeeded"] == 3
+    assert result["failed_segments"] == []
+    assert result["finished"] is True
+
+
+def test_chunk_none_keeps_single_job_shape(live_runner):
+    """正例: 不分片时保持单任务结构，常见调用不被批次结构复杂化"""
+    with patch.object(params, "build_argv", return_value=_harmless()):
+        result = server.etl_import_daily(begin="20260115", end="20260320",
+                                         wait_seconds=15)
+    assert "job_id" in result
+    assert "batch_id" not in result
+
+
+def test_failed_segments_are_collected(live_runner):
+    """正例(核心): 失败的段被单独收集，附带 last_line 供定向重跑"""
+    with patch.object(params, "build_argv",
+                      return_value=_harmless("import sys; print('   已处理: 30/100'); sys.exit(1)")):
+        result = server.etl_import_daily(begin="20260115", end="20260228",
+                                         chunk="month", wait_seconds=30)
+    assert result["ok"] is True
+    assert len(result["failed_segments"]) == 2
+    first = result["failed_segments"][0]
+    assert first["begin"] == "20260115"
+    assert "已处理: 30/100" in first["last_line"]
+    assert "定向重跑" in result["note"]
+
+
+def test_chunked_run_allows_span_over_limit(live_runner):
+    """正例(关键): 超过 3650 天的区间分片后放行——分片正是为此存在"""
+    with patch.object(params, "build_argv", return_value=_harmless()):
+        result = server.etl_import_daily(begin="20000101", end="20260101",
+                                         chunk="year", wait_seconds=60)
+    assert result["ok"] is True
+    assert result["segment_count"] == 27
+
+
+def test_unchunked_span_over_limit_still_rejected(fake_schema, live_runner):
+    """反例: 不分片时超长跨度仍必须拒绝"""
+    result = server.etl_import_daily(begin="20000101", end="20260101", wait_seconds=0)
+    assert result["ok"] is False
+    assert "超过上限" in result["error"]
+
+
+def test_invalid_chunk_rejected(live_runner):
+    """反例: 未知分片方式"""
+    result = server.etl_import_daily(begin="20260101", end="20260201",
+                                     chunk="week", wait_seconds=0)
+    assert result["ok"] is False
+    assert "chunk 取值非法" in result["error"]
+
+
+def test_retries_capped(live_runner):
+    """反例: retries 被夹到上限，防止一个坏段无限重试占住串行队列"""
+    with patch.object(params, "build_argv", return_value=_harmless()), \
+         patch.object(runner_mod.Runner, "submit", return_value="fake") as submit, \
+         patch.object(runner_mod.Runner, "get",
+                      return_value={"job_id": "fake", "status": schema.STATUS_QUEUED,
+                                    "queue_position": 0}):
+        server.etl_import_daily(begin="20260817", retries=999, wait_seconds=0)
+    assert submit.call_args.kwargs["retries"] == schema.MAX_RETRIES
+
+
+# ── check_data_gaps（M4）─────────────────────────────────────────────────────
+
+_GAPS_PAYLOAD = {
+    "tool": "check_daily",
+    "status": "gaps_found",
+    "exit_code": 1,
+    "params": {"begin": "2026-08-17", "end": "2026-08-17"},
+    "core": {
+        "missing_total": 2,
+        "checks": [{
+            "label": "日线数据", "table": "STOCK_DAILY", "missing": 2,
+            "gap_dates": [{"date": "2026-08-17", "expected": 2, "actual": 0, "missing": 2}],
+            "missing_codes": [{"date": "2026-08-17", "code": "600519.SH", "name": "贵州茅台"}],
+            "missing_codes_truncated": False, "missing_codes_total": 1,
+            "csv_path": "/tmp/x.csv",
+        }],
+        "detail_truncated": False, "json_max_detail": 200,
+    },
+    "warnings": {"total": 0, "checks": []},
+    "error": None,
+}
+
+
+def _fake_proc(stdout="", returncode=0, stderr=""):
+    return MagicMock(stdout=stdout, stderr=stderr, returncode=returncode)
+
+
+def test_check_data_gaps_reports_gaps(live_runner):
+    """正例(核心): 返回缺失日期与代码，正是补数闭环的输入"""
+    import json as json_mod
+    with patch.object(server.subprocess, "run",
+                      return_value=_fake_proc(json_mod.dumps(_GAPS_PAYLOAD))), \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        result = server.check_data_gaps(begin="20260817")
+    assert result["ok"] is True
+    assert result["has_gaps"] is True
+    assert "2 条缺失" in result["summary"]
+    check = result["core"]["checks"][0]
+    assert check["gap_dates"][0]["date"] == "2026-08-17"
+    assert check["missing_codes"][0]["code"] == "600519.SH"
+
+
+def test_check_data_gaps_complete(live_runner):
+    """正例: 数据完整"""
+    import json as json_mod
+    payload = {**_GAPS_PAYLOAD, "status": "complete",
+               "core": {**_GAPS_PAYLOAD["core"], "missing_total": 0}}
+    with patch.object(server.subprocess, "run",
+                      return_value=_fake_proc(json_mod.dumps(payload))), \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        result = server.check_data_gaps(begin="20260817")
+    assert result["ok"] is True
+    assert result["has_gaps"] is False
+
+
+def test_check_data_gaps_never_uses_shell(live_runner):
+    """正例(安全): 必须以 argv 列表调用且 shell=False"""
+    import json as json_mod
+    with patch.object(server.subprocess, "run",
+                      return_value=_fake_proc(json_mod.dumps(_GAPS_PAYLOAD))) as run, \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        server.check_data_gaps(begin="20260817")
+    argv = run.call_args.args[0]
+    assert isinstance(argv, list)
+    assert argv[-1] == "--json"
+    assert run.call_args.kwargs["shell"] is False
+
+
+def test_check_data_gaps_rejects_injection_before_subprocess(live_runner):
+    """反例(关键): 非法代码在起子进程之前就被拦下"""
+    with patch.object(server.subprocess, "run") as run:
+        result = server.check_data_gaps(begin="20260817",
+                                        codes=["600519; DROP TABLE"])
+    assert result["ok"] is False
+    assert "代码非法" in result["error"]
+    run.assert_not_called()
+
+
+def test_check_data_gaps_surfaces_check_error(live_runner):
+    """反例: 检查工具自己报错时如实上报"""
+    import json as json_mod
+    payload = {"tool": "check_daily", "status": "error", "exit_code": 2,
+               "error": "参数校验失败，详见 stderr 日志"}
+    with patch.object(server.subprocess, "run",
+                      return_value=_fake_proc(json_mod.dumps(payload), returncode=2)), \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        result = server.check_data_gaps(begin="20260822")
+    assert result["ok"] is False
+    assert "参数校验失败" in result["error"]
+
+
+def test_check_data_gaps_handles_non_json_output(live_runner):
+    """反例: 输出不是 JSON 时给出可诊断的信息，不抛裸异常"""
+    with patch.object(server.subprocess, "run",
+                      return_value=_fake_proc("Traceback...", returncode=1)), \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        result = server.check_data_gaps(begin="20260817")
+    assert result["ok"] is False
+    assert "不是合法 JSON" in result["error"]
+    assert "Traceback" in result["stdout_head"]
+
+
+def test_check_data_gaps_empty_output_hints_db_lock(live_runner):
+    """反例(关键): 空输出时提示写锁——DuckDB 单写者会挡住只读连接"""
+    with patch.object(params, "build_argv",
+                      return_value=_harmless("import time; print('x'); time.sleep(30)")):
+        started = server.etl_import_daily(begin="20260817", wait_seconds=0,
+                                          stall_timeout=30, max_runtime=60)
+    import time as _t
+    deadline = _t.monotonic() + 10
+    while _t.monotonic() < deadline:
+        if server.get_job(started["job_id"])["status"] == schema.STATUS_RUNNING:
+            break
+        _t.sleep(0.05)
+
+    with patch.object(server.subprocess, "run",
+                      return_value=_fake_proc("", returncode=1, stderr="Conflicting lock")), \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        result = server.check_data_gaps(begin="20260817")
+    assert result["ok"] is False
+    assert "写任务在跑" in (result["hint"] or "")
+    server.cancel_job(started["job_id"], force=True)
+
+
+def test_check_data_gaps_timeout(live_runner):
+    """反例: 检查超时给出可执行建议"""
+    import subprocess as sp
+    with patch.object(server.subprocess, "run",
+                      side_effect=sp.TimeoutExpired("cmd", 300)), \
+         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
+        result = server.check_data_gaps(begin="20260817", timeout_seconds=300)
+    assert result["ok"] is False
+    assert "超时" in result["error"]

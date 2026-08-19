@@ -301,3 +301,130 @@ def test_span_days_inclusive():
     """正例: 跨度含首尾"""
     assert params.span_days("20260817", "20260817") == 1
     assert params.span_days("20260817", "20260818") == 2
+
+
+# ── 分片（M4 断点续跑）────────────────────────────────────────────────────────
+# 分片在卡死场景价值最大：单段卡死只损失一段，把「整晚白跑」降级为「丢一段」。
+
+def test_split_none_returns_single_segment():
+    """正例: 不分片时原样返回一段"""
+    assert params.split_range("20260115", "20260420", schema.CHUNK_NONE) == [
+        ("20260115", "20260420")]
+
+
+def test_split_month_aligns_to_calendar_boundaries():
+    """正例(核心): 按自然月切，首尾段被原区间裁剪
+
+    对齐自然边界而非固定天数——人和模型补数时都按「某年某月」思考，
+    段边界与之一致才好定位与重跑。
+    """
+    assert params.split_range("20260115", "20260420", schema.CHUNK_MONTH) == [
+        ("20260115", "20260131"),
+        ("20260201", "20260228"),
+        ("20260301", "20260331"),
+        ("20260401", "20260420"),
+    ]
+
+
+def test_split_month_handles_leap_february():
+    """正例(边界): 闰年 2 月是 29 天"""
+    segments = params.split_range("20240201", "20240301", schema.CHUNK_MONTH)
+    assert segments[0] == ("20240201", "20240229")
+
+
+def test_split_year_crosses_year_boundary():
+    """正例: 按年切"""
+    assert params.split_range("20251201", "20260201", schema.CHUNK_YEAR) == [
+        ("20251201", "20251231"),
+        ("20260101", "20260201"),
+    ]
+
+
+def test_split_single_day():
+    """正例(边界): 单日无论怎么分片都只有一段"""
+    for chunk in schema.CHUNK_CHOICES:
+        assert params.split_range("20260817", "20260817", chunk) == [
+            ("20260817", "20260817")]
+
+
+def test_split_exact_month_range():
+    """正例(边界): 恰好一整月不该被切成两段"""
+    assert params.split_range("20260201", "20260228", schema.CHUNK_MONTH) == [
+        ("20260201", "20260228")]
+
+
+def test_split_segments_are_contiguous_and_complete():
+    """正例(不变式): 分片必须无缝无重叠地覆盖原区间——漏一天就是漏数据"""
+    begin, end = "20240115", "20260420"
+    for chunk in (schema.CHUNK_MONTH, schema.CHUNK_YEAR):
+        segments = params.split_range(begin, end, chunk)
+        assert segments[0][0] == begin
+        assert segments[-1][1] == end
+        for (_, prev_end), (next_begin, _) in zip(segments, segments[1:]):
+            gap = params.parse_date(next_begin, "b") - params.parse_date(prev_end, "e")
+            assert gap.days == 1, f"段间不连续: {prev_end} → {next_begin}"
+
+
+def test_split_rejects_unknown_chunk():
+    """反例: 未知分片方式"""
+    with pytest.raises(params.ParamError, match="chunk 取值非法"):
+        params.split_range("20260101", "20260201", "week")
+
+
+def test_split_rejects_reversed_range():
+    """反例: 起始晚于结束"""
+    with pytest.raises(params.ParamError, match="不能晚于"):
+        params.split_range("20260201", "20260101", schema.CHUNK_MONTH)
+
+
+def test_split_rejects_invalid_date():
+    """反例: 非法日期"""
+    with pytest.raises(params.ParamError, match="不是有效日期"):
+        params.split_range("20261301", "20270101", schema.CHUNK_MONTH)
+
+
+# ── check_daily argv 构造 ─────────────────────────────────────────────────────
+
+def _check_argv(**kwargs) -> list[str]:
+    return params.build_check_argv(kwargs, python=FAKE_PYTHON)
+
+
+def test_check_argv_always_appends_json():
+    """正例(关键): 本服务只消费机器可读输出，--json 必须恒定加上"""
+    argv = _check_argv(begin="20260817", end="20260817")
+    assert argv[:3] == [FAKE_PYTHON, "-m", "tools.check_daily"]
+    assert argv[-1] == "--json"
+
+
+def test_check_argv_renders_all_flags():
+    """正例: 各参数正确映射到 flag"""
+    argv = _check_argv(begin="20260817", end="20260818", codes=["600519.sh"],
+                       exchanges=["SH"], include_index=True, forcerun=True,
+                       json_max_detail=50)
+    assert argv[3:] == ["-b", "20260817", "-e", "20260818",
+                        "-c", "600519.SH", "-x", "sh", "-i", "-f",
+                        "--json-max-detail", "50", "--json"]
+
+
+def test_check_argv_rejects_injection():
+    """反例(关键): 校验强度与 ETL 侧一致，不因为是只读工具就放松"""
+    with pytest.raises(params.ParamError, match="代码非法"):
+        _check_argv(begin="20260817", codes=["600519; DROP TABLE"])
+
+
+def test_check_argv_rejects_unknown_param():
+    """反例: 未知参数名"""
+    with pytest.raises(params.ParamError, match="不接受参数"):
+        _check_argv(begin="20260817", nosuch=1)
+
+
+def test_check_argv_rejects_bad_exchange():
+    """反例: 非法交易所"""
+    with pytest.raises(params.ParamError, match="exchanges 取值非法"):
+        _check_argv(begin="20260817", exchanges=["hk"])
+
+
+def test_check_argv_allows_long_span():
+    """正例: 完整性检查是只读的，不受 ETL 的跨度上限约束"""
+    argv = _check_argv(begin="20000101", end="20260101")
+    assert "-b" in argv

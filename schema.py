@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：程序注册表、退出码契约、状态机枚举与环境变量出口，
 #                       作为本服务与 spring 之间跨仓契约的单一出处
+#   2026-08-19  Claude  新增分片枚举、可重试状态集与 check_daily 的 JSON 契约
 """与 spring 的跨仓契约(single source of truth)。
 
 本服务对 ETL 的内部逻辑「零知识」(ADR-5)，只需要三件事：
@@ -35,6 +36,15 @@ FILL_TARGETS: tuple[str, ...] = ("fill_volratio", "update_limit", "fill_shares")
 
 # spring 的自省出口(ADR-4/7)
 DESCRIBE_MODULE = "tools.describe_cli"
+
+# 数据完整性检查工具。它是**只读**的，不占写锁队列，由 params/server 直接内联调用。
+# 注意它的退出码是另一套语义(0=完整 / 1=有缺失 / 2=检查出错)，与下面的 EXIT_CODE_STATUS
+# **不通用**——调用方一律以其 JSON 输出的 status 字段为准，不解读它的退出码。
+CHECK_MODULE = "tools.check_daily"
+
+CHECK_STATUS_COMPLETE = "complete"
+CHECK_STATUS_GAPS_FOUND = "gaps_found"
+CHECK_STATUS_ERROR = "error"
 
 # ---- 任务状态机(文档 5.1) ----
 STATUS_QUEUED = "queued"
@@ -90,6 +100,18 @@ SHORT_SPAN_DAYS = 7
 STALL_TIMEOUT_SHORT = 90
 STALL_TIMEOUT_LONG = 600
 MAX_RUNTIME_DEFAULT = 7200
+
+# ---- 分片与重试(文档 6.1 的 MCP 层附加参数) ----
+CHUNK_NONE = "none"
+CHUNK_MONTH = "month"
+CHUNK_YEAR = "year"
+CHUNK_CHOICES: tuple[str, ...] = (CHUNK_NONE, CHUNK_MONTH, CHUNK_YEAR)
+
+# 哪些终态值得自动重试。
+# 不含 cancelled——那是人的决定，自动重跑会推翻它；
+# 不含 partial——部分成功重跑整段是浪费，应由调用方按缺口定向补。
+RETRYABLE_STATUSES = frozenset({STATUS_FAILED, STATUS_KILLED_STALLED})
+MAX_RETRIES = 5
 
 # ---- 参数安全约束(文档 十一) ----
 MAX_SPAN_DAYS = 3650

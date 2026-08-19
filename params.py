@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：自省 spring 的 argparse 定义并据此构造/校验 argv
+#   2026-08-19  Claude  新增 split_range：按自然月/年分片，供断点续跑
 """参数自省与 argv 构造。
 
 参数 schema 不写死在本仓库，而是运行时调用 spring 的 `tools.describe_cli` 取回(ADR-4)：
@@ -19,7 +20,7 @@ spring 增删改参数后本服务零改动，`help` 文本也原样透传给模
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -253,3 +254,104 @@ def _render_scalar(dest: str, value: Any, spec: dict) -> str:
 def span_days(begin: Any, end: Any) -> int:
     """给定日期区间的天数(含首尾)，供调用方挑选 stall_timeout 档位。"""
     return (parse_date(end, "end") - parse_date(begin, "begin")).days + 1
+
+
+def split_range(begin: Any, end: Any, chunk: str = schema.CHUNK_NONE) -> list[tuple[str, str]]:
+    """把日期区间按自然月/年切成若干段，返回 [(begin, end), ...]。
+
+    分片在卡死场景价值最大：单段卡死只损失一段，杀掉后按 last_line 的进度
+    配合 codes 精确重跑，把「整晚白跑」降级为「丢一段」。
+
+    切分对齐**自然边界**而非固定天数——补数时人和模型都按「某年某月」思考，
+    段边界与之一致才好定位与重跑。首尾两段会被原区间裁剪，不会越界。
+    """
+    if chunk not in schema.CHUNK_CHOICES:
+        raise ParamError(
+            f"chunk 取值非法: '{chunk}'；可选: {', '.join(schema.CHUNK_CHOICES)}"
+        )
+
+    start = parse_date(begin, "begin")
+    stop = parse_date(end, "end")
+    if start > stop:
+        raise ParamError(f"begin 不能晚于 end: begin={start:%Y%m%d}, end={stop:%Y%m%d}")
+
+    if chunk == schema.CHUNK_NONE:
+        return [(f"{start:%Y%m%d}", f"{stop:%Y%m%d}")]
+
+    segments: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= stop:
+        boundary = (_month_end(cursor) if chunk == schema.CHUNK_MONTH
+                    else datetime(cursor.year, 12, 31))
+        segment_end = min(boundary, stop)
+        segments.append((f"{cursor:%Y%m%d}", f"{segment_end:%Y%m%d}"))
+        cursor = segment_end + timedelta(days=1)
+    return segments
+
+
+def build_check_argv(values: dict[str, Any] | None = None, *,
+                     python: str | Path | None = None) -> list[str]:
+    """构造 tools.check_daily 的 argv（数据完整性检查，只读）。
+
+    这里的 flag 是**写死**的，没有走 describe_cli 自省，原因有二：
+
+    1. `schema.PROGRAMS` 是**写入白名单**——只有它里面的模块能被当作 ETL 启动。
+       check_daily 是只读工具，不该混进那份名单，否则白名单就不再是「写入面」的边界。
+    2. 它的参数面小且稳定，spring 侧另有契约测试钉住这几个 flag（见
+       `tests/unit/test_check_daily_json.py::test_common_flags_preserved`），
+       改了那边会红，不会悄悄漂移。
+
+    校验复用与 ETL 相同的原语，安全性不打折。
+    """
+    values = {k: v for k, v in (values or {}).items() if v is not None}
+
+    known = {"begin", "end", "codes", "exchanges", "include_index",
+             "forcerun", "json_max_detail"}
+    unknown = set(values) - known
+    if unknown:
+        raise ParamError(
+            f"check_daily 不接受参数: {', '.join(sorted(unknown))}；"
+            f"可用: {', '.join(sorted(known))}"
+        )
+
+    _validate_date_range(values, allow_long_span=True)
+
+    argv: list[str] = []
+    if "begin" in values:
+        argv += ["-b", f"{parse_date(values['begin'], 'begin'):%Y%m%d}"]
+    if "end" in values:
+        argv += ["-e", f"{parse_date(values['end'], 'end'):%Y%m%d}"]
+    if values.get("codes"):
+        codes = values["codes"]
+        codes = codes if isinstance(codes, (list, tuple)) else [codes]
+        argv += ["-c", *[normalize_code(c) for c in codes]]
+    if values.get("exchanges"):
+        exchanges = values["exchanges"]
+        exchanges = exchanges if isinstance(exchanges, (list, tuple)) else [exchanges]
+        rendered = []
+        for item in exchanges:
+            text = str(item).strip().lower()
+            allowed = [e.lower() for e in schema.EXCHANGES] + ["all"]
+            if text not in allowed:
+                raise ParamError(
+                    f"exchanges 取值非法: '{item}'；可选: {', '.join(allowed)}")
+            rendered.append(text)
+        argv += ["-x", *rendered]
+    if values.get("include_index"):
+        argv.append("-i")
+    if values.get("forcerun"):
+        argv.append("-f")
+
+    limit = values.get("json_max_detail")
+    if limit is not None:
+        argv += ["--json-max-detail", str(int(limit))]
+
+    interpreter = str(python) if python else str(schema.spring_python())
+    # --json 恒定加上：本服务只消费机器可读输出
+    return [interpreter, "-m", schema.CHECK_MODULE, *argv, "--json"]
+
+
+def _month_end(moment: datetime) -> datetime:
+    if moment.month == 12:
+        return datetime(moment.year, 12, 31)
+    return datetime(moment.year, moment.month + 1, 1) - timedelta(days=1)

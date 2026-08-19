@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：FastMCP 入口，注册 ETL 执行、任务管理与自省 Tool
 #   2026-08-19  Claude  新增日志类 Tool：list_etl_logs / read_etl_log / summarize_etl_log
+#   2026-08-19  Claude  新增分片执行、失败重试与 check_data_gaps
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -17,7 +18,12 @@
 spring 改了枚举或删了参数，这里会立刻报错而不是默默拼出一个错误的命令行。
 模型需要看当前真实参数时，调 describe_etl_program。
 """
+import json
+import os
+import subprocess
 import sys
+import time
+import uuid
 
 import logs as logs_mod
 import params
@@ -107,34 +113,58 @@ def _error(message: str, **extra) -> dict:
 
 # ---------------------------------------------------------------- 执行
 
+def _resolve_stall_timeout(values: dict, override: int | None) -> int:
+    if override is not None:
+        return override
+    # 按日期跨度分档：长区间任务本身进度间隔就长，阈值需放宽
+    try:
+        span = (params.span_days(values["begin"], values["end"])
+                if "begin" in values and "end" in values else 1)
+    except params.ParamError:
+        span = 1
+    return schema.stall_timeout_default() or schema.default_stall_timeout(span)
+
+
+def _submit_one(program: str, values: dict, *,
+                stall_timeout: int | None, max_runtime: int | None,
+                retries: int, meta: dict | None = None) -> str:
+    argv = params.build_argv(program, values)
+    return get_runner().submit(
+        program, argv,
+        stall_timeout=_resolve_stall_timeout(values, stall_timeout),
+        max_runtime=max_runtime,
+        retries=retries,
+        meta={"params": values, **(meta or {})},
+    )
+
+
 def _launch(program: str, values: dict, *,
             wait_seconds: int,
             stall_timeout: int | None,
-            max_runtime: int | None) -> dict:
-    """校验参数 → 构造 argv → 提交 → 内联等待至多 wait_seconds。"""
+            max_runtime: int | None,
+            chunk: str = schema.CHUNK_NONE,
+            retries: int = 0) -> dict:
+    """校验参数 → 构造 argv → 提交 → 内联等待至多 wait_seconds。
+
+    chunk 非 none 时按自然月/年分片，每段一个任务，返回批次结构（含 failed_segments）；
+    chunk 为 none 时返回单任务结构。两种形状的第一个字段都是 ok，
+    随后分别看 job_id 或 batch_id。
+    """
     values = {k: v for k, v in values.items() if v is not None}
+    retries = max(0, min(int(retries), schema.MAX_RETRIES))
+
+    if chunk != schema.CHUNK_NONE:
+        return _launch_chunked(program, values, chunk=chunk, retries=retries,
+                               wait_seconds=wait_seconds,
+                               stall_timeout=stall_timeout, max_runtime=max_runtime)
+
     try:
-        argv = params.build_argv(program, values)
+        job_id = _submit_one(program, values, stall_timeout=stall_timeout,
+                             max_runtime=max_runtime, retries=retries)
     except params.ParamError as e:
         return _error(str(e), program=program)
     except params.IntrospectionError as e:
         return _error(f"无法获取 '{program}' 的参数定义：{e}", program=program)
-
-    if stall_timeout is None:
-        # 按日期跨度分档：长区间任务本身进度间隔就长，阈值需放宽
-        try:
-            span = params.span_days(values["begin"], values["end"]) \
-                if "begin" in values and "end" in values else 1
-        except params.ParamError:
-            span = 1
-        stall_timeout = schema.stall_timeout_default() or schema.default_stall_timeout(span)
-
-    job_id = get_runner().submit(
-        program, argv,
-        stall_timeout=stall_timeout,
-        max_runtime=max_runtime,
-        meta={"params": values},
-    )
 
     info = (get_runner().wait(job_id, timeout=wait_seconds) if wait_seconds > 0
             else get_runner().get(job_id))
@@ -147,6 +177,97 @@ def _launch(program: str, values: dict, *,
     return result
 
 
+def _launch_chunked(program: str, values: dict, *, chunk: str, retries: int,
+                    wait_seconds: int, stall_timeout: int | None,
+                    max_runtime: int | None) -> dict:
+    """分片执行。单段卡死只损失一段，把「整晚白跑」降级为「丢一段」。"""
+    if "begin" not in values or "end" not in values:
+        return _error("分片执行需要同时指定 begin 与 end", program=program)
+    try:
+        segments = params.split_range(values["begin"], values["end"], chunk)
+    except params.ParamError as e:
+        return _error(str(e), program=program)
+
+    batch_id = f"{program}-batch-{uuid.uuid4().hex[:8]}"
+    submitted: list[dict] = []
+    for index, (seg_begin, seg_end) in enumerate(segments):
+        seg_values = {**values, "begin": seg_begin, "end": seg_end}
+        try:
+            job_id = _submit_one(
+                program, seg_values,
+                stall_timeout=stall_timeout, max_runtime=max_runtime,
+                retries=retries,
+                meta={"batch_id": batch_id, "segment_index": index,
+                      "segment": [seg_begin, seg_end]},
+            )
+        except params.ParamError as e:
+            # 某一段参数就不合法时立刻停手，已提交的段照常跑完
+            return {"ok": False, "error": str(e), "program": program,
+                    "batch_id": batch_id, "failed_segment": [seg_begin, seg_end],
+                    "submitted": submitted}
+        except params.IntrospectionError as e:
+            return _error(f"无法获取 '{program}' 的参数定义：{e}", program=program)
+        submitted.append({"begin": seg_begin, "end": seg_end, "job_id": job_id})
+
+    # 等待预算是整批共享的，不是每段各给一份
+    deadline = time.monotonic() + max(0, wait_seconds)
+    for item in submitted:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        get_runner().wait(item["job_id"], timeout=remaining)
+
+    return _batch_view(batch_id, chunk, submitted)
+
+
+def _batch_view(batch_id: str, chunk: str, submitted: list[dict]) -> dict:
+    jobs = [_view(j) for j in get_runner().batch(batch_id)]
+    by_id = {j["job_id"]: j for j in jobs}
+    segments = []
+    failed_segments = []
+    for item in submitted:
+        info = by_id.get(item["job_id"], {})
+        entry = {
+            "begin": item["begin"], "end": item["end"],
+            "job_id": item["job_id"],
+            "status": info.get("status"),
+            "attempt": info.get("attempt"),
+            "progress": info.get("progress"),
+        }
+        segments.append(entry)
+        if info.get("status") in _ATTENTION_STATUSES:
+            failed_segments.append({
+                **entry,
+                "last_line": info.get("last_line"),
+                "error": info.get("error"),
+                "status_hint": info.get("status_hint"),
+            })
+
+    pending = [s for s in segments if s["status"] not in schema.TERMINAL_STATUSES]
+    succeeded = sum(1 for s in segments if s["status"] == schema.STATUS_SUCCEEDED)
+
+    note_parts = []
+    if pending:
+        note_parts.append(f"{len(pending)} 段仍在后台，用 list_jobs 或 get_job 跟进")
+    if failed_segments:
+        note_parts.append(
+            f"{len(failed_segments)} 段需要关注；可按 last_line 的进度用 codes "
+            f"对该段定向重跑，无需整体重来"
+        )
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "chunk": chunk,
+        "segment_count": len(segments),
+        "succeeded": succeeded,
+        "failed_segments": failed_segments,
+        "pending_count": len(pending),
+        "finished": not pending,
+        "segments": segments,
+        "note": "；".join(note_parts) or "全部分片成功",
+    }
+
+
 # ---------------------------------------------------------------- ETL 执行类 Tool
 
 @mcp.tool()
@@ -157,6 +278,8 @@ def etl_import_daily(
     exchanges: list[str] | None = None,
     source: str | None = None,
     print_only: bool = False,
+    chunk: str = schema.CHUNK_NONE,
+    retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
     stall_timeout: int | None = None,
     max_runtime: int | None = None,
@@ -167,12 +290,18 @@ def etl_import_daily(
     codes 形如 ["600519", "000001.SZ"]，不传则按 exchanges 处理全市场。
     print_only=True 为干跑：只把结果打到屏幕，不写库，适合先验证一遍。
     wait_seconds 内跑完直接返回结果，否则转后台并返回 job_id。
+    
+    chunk 可设 month / year 按自然月或年分片：每段一个任务串行执行，
+    单段卡死只损失一段，返回结构里的 failed_segments 指出哪几段要补。
+    超过 3650 天的区间**必须**分片，否则会被拒绝。
+    retries 是单段失败(含被判卡死后终止)的自动重试次数，上限 5。
     """
     return _launch("import_daily", {
         "begin": begin, "end": end if end is not None else begin,
         "codes": codes, "exchanges": exchanges,
         "source": source, "print_only": print_only or None,
-    }, wait_seconds=wait_seconds, stall_timeout=stall_timeout, max_runtime=max_runtime)
+    }, wait_seconds=wait_seconds, stall_timeout=stall_timeout,
+       max_runtime=max_runtime, chunk=chunk, retries=retries)
 
 
 @mcp.tool()
@@ -182,6 +311,8 @@ def etl_adjust(
     codes: list[str] | None = None,
     exchanges: list[str] | None = None,
     source: str | None = None,
+    chunk: str = schema.CHUNK_NONE,
+    retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
     stall_timeout: int | None = None,
     max_runtime: int | None = None,
@@ -189,11 +320,17 @@ def etl_adjust(
     """下载复权因子并稠密化到逐交易日（etl.adjust）。
 
     即便区间内没有新的复权事件也应执行——它同时负责把 ADJ_FACTOR 向前填充到 end。
+    
+    chunk 可设 month / year 按自然月或年分片：每段一个任务串行执行，
+    单段卡死只损失一段，返回结构里的 failed_segments 指出哪几段要补。
+    超过 3650 天的区间**必须**分片，否则会被拒绝。
+    retries 是单段失败(含被判卡死后终止)的自动重试次数，上限 5。
     """
     return _launch("adjust", {
         "begin": begin, "end": end if end is not None else begin,
         "codes": codes, "exchanges": exchanges, "source": source,
-    }, wait_seconds=wait_seconds, stall_timeout=stall_timeout, max_runtime=max_runtime)
+    }, wait_seconds=wait_seconds, stall_timeout=stall_timeout,
+       max_runtime=max_runtime, chunk=chunk, retries=retries)
 
 
 @mcp.tool()
@@ -203,15 +340,24 @@ def etl_fetch_index(
     codes: list[str] | None = None,
     exchanges: list[str] | None = None,
     source: str | None = None,
+    chunk: str = schema.CHUNK_NONE,
+    retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
     stall_timeout: int | None = None,
     max_runtime: int | None = None,
 ) -> dict:
-    """下载指数日线交易明细并入库（etl.fetch_index）。codes 传指数代码，如 ["000001"]。"""
+    """下载指数日线交易明细并入库（etl.fetch_index）。codes 传指数代码，如 ["000001"]。
+
+    chunk 可设 month / year 按自然月或年分片：每段一个任务串行执行，
+    单段卡死只损失一段，返回结构里的 failed_segments 指出哪几段要补。
+    超过 3650 天的区间**必须**分片，否则会被拒绝。
+    retries 是单段失败(含被判卡死后终止)的自动重试次数，上限 5。
+    """
     return _launch("fetch_index", {
         "begin": begin, "end": end if end is not None else begin,
         "codes": codes, "exchanges": exchanges, "source": source,
-    }, wait_seconds=wait_seconds, stall_timeout=stall_timeout, max_runtime=max_runtime)
+    }, wait_seconds=wait_seconds, stall_timeout=stall_timeout,
+       max_runtime=max_runtime, chunk=chunk, retries=retries)
 
 
 @mcp.tool()
@@ -222,6 +368,7 @@ def etl_fill_indicators(
     exchanges: list[str] | None = None,
     forcerun: bool = False,
     targets: list[str] | None = None,
+    retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
     stall_timeout: int | None = None,
     max_runtime: int | None = None,
@@ -252,7 +399,8 @@ def etl_fill_indicators(
             "begin": begin, "end": end if end is not None else begin,
             "codes": codes, "exchanges": exchanges,
             "forcerun": forcerun or None,
-        }, wait_seconds=budget, stall_timeout=stall_timeout, max_runtime=max_runtime)
+        }, wait_seconds=budget, stall_timeout=stall_timeout,
+           max_runtime=max_runtime, retries=retries)
         results.append(started)
         if not started.get("ok"):
             return {"ok": False, "error": started["error"],
@@ -385,6 +533,112 @@ def summarize_etl_log(date: str | None = None) -> dict:
         return _error(str(e), hint="用 list_etl_logs 看有哪些日期的日志")
     except (ValueError, RuntimeError) as e:
         return _error(str(e))
+
+
+# ---------------------------------------------------------------- 校验类 Tool
+
+CHECK_TIMEOUT_DEFAULT = 300
+
+
+@mcp.tool()
+def check_data_gaps(
+    begin: str,
+    end: str | None = None,
+    codes: list[str] | None = None,
+    exchanges: list[str] | None = None,
+    include_index: bool = False,
+    forcerun: bool = False,
+    max_detail: int = 200,
+    timeout_seconds: int = CHECK_TIMEOUT_DEFAULT,
+) -> dict:
+    """检查指定区间的数据完整性，返回缺失的日期与股票清单（转发 tools.check_daily）。
+
+    基于 DB 事实判定：用 STOCK_INFO + TRADE_CAL 算出预期记录数，反查实际落库数，
+    因此 ETL 逻辑怎么变，检查结果都自动跟着变。停牌股票不计入缺失。
+
+    **补数闭环**：summarize_etl_log → check_data_gaps → 用返回的 date/codes
+    定向调 etl_* 补 → 再 check_data_gaps 复核。
+
+    返回里看两处：
+      * `core.checks[].gap_dates` —— 哪几天缺、缺几条，喂给 begin/end；
+      * `core.checks[].missing_codes` —— 具体缺哪些代码，喂给 codes。
+        它受 max_detail 约束（默认 200），截断时 missing_codes_truncated 为真，
+        完整明细见同一项里的 csv_path。
+
+    以 `status` 判断结果（complete / gaps_found / error），
+    **不要**用退出码——check_daily 的退出码是另一套语义。
+
+    本工具只读，不进 ETL 的串行队列，因此不会被正在跑的补数任务挡住；
+    但若此刻有写任务持有 DuckDB 写锁，只读连接会打不开，届时会明确报错。
+    """
+    values = {
+        "begin": begin, "end": end if end is not None else begin,
+        "codes": codes, "exchanges": exchanges,
+        "include_index": include_index or None,
+        "forcerun": forcerun or None,
+        "json_max_detail": max_detail,
+    }
+    try:
+        argv = params.build_check_argv(values)
+    except params.ParamError as e:
+        return _error(str(e))
+    except RuntimeError as e:            # 环境变量未配置
+        return _error(str(e))
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(schema.spring_dir()),
+            capture_output=True, text=True,
+            timeout=timeout_seconds,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _error(f"完整性检查超时（{timeout_seconds}s）；"
+                      f"可缩小日期区间或指定 codes 后重试")
+    except OSError as e:
+        return _error(f"无法启动检查进程：{e}")
+
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return _error(
+            f"检查未返回结果（exit={proc.returncode}）",
+            stderr_tail=(proc.stderr or "").strip()[-800:],
+            hint=_db_lock_hint(),
+        )
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        return _error(f"检查输出不是合法 JSON：{e}",
+                      stdout_head=stdout[:400],
+                      stderr_tail=(proc.stderr or "").strip()[-800:])
+
+    if payload.get("status") == schema.CHECK_STATUS_ERROR:
+        return {"ok": False, "error": payload.get("error", "检查出错"),
+                **payload, "hint": _db_lock_hint()}
+
+    has_gaps = payload.get("status") == schema.CHECK_STATUS_GAPS_FOUND
+    return {
+        "ok": True,
+        "has_gaps": has_gaps,
+        "summary": (f"发现 {payload['core']['missing_total']} 条缺失"
+                    if has_gaps else "核心日线数据完整"),
+        **payload,
+    }
+
+
+def _db_lock_hint() -> str | None:
+    """DuckDB 单写者：有写任务在跑时只读连接打不开，提示调用方等它结束。"""
+    try:
+        running = [j["job_id"] for j in get_runner().list(limit=50)
+                   if j["status"] in (schema.STATUS_RUNNING, schema.STATUS_STALLED)]
+    except Exception:                    # noqa: BLE001 提示信息拿不到不该盖过真实错误
+        return None
+    if running:
+        return (f"当前有写任务在跑（{', '.join(running)}），DuckDB 单写者会挡住只读连接。"
+                f"可等它结束或先 cancel_job 再重试。")
+    return None
 
 
 # ---------------------------------------------------------------- 自省 Tool
