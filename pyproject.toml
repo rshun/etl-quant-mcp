@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etl-quant-mcp"
+version = "0.1.0"
+description = "ETL 调度 MCP 服务：以子进程方式驱动 spring 的 ETL 程序，提供卡死检测与断点续跑"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp==1.25.0",
+]
+
+# 安装后提供命令行入口 `etl-quant-mcp`，等价于 `python server.py`
+# server.py 属 M2，尚未创建；届时再放开入口点声明
+# [project.scripts]
+# etl-quant-mcp = "server:main"
+
+[tool.setuptools]
+py-modules = ["schema", "params", "runner"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "integration: 需要真实 spring 环境(SPRING_DIR/SPRING_PYTHON)，用 -m \"not integration\" 跳过",
+]
