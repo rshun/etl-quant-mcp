@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "quant-etl": {
+      "command": "/absolute/path/to/etl-quant-mcp-venv/bin/python",
+      "args": ["/absolute/path/to/etl-quant-mcp/server.py"],
+      "env": {
+        "SPRING_DIR": "/absolute/path/to/spring",
+        "SPRING_PYTHON": "/absolute/path/to/spring-venv/bin/python",
+        "STALL_TIMEOUT_DEFAULT": "",
+        "MAX_RUNTIME_DEFAULT": "7200",
+        "LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}

@@ -176,19 +176,21 @@ def build_argv(program: str, params: dict[str, Any] | None = None, *,
 
     _validate_date_range(params, allow_long_span=allow_long_span)
 
-    interpreter = str(python) if python else str(schema.spring_python())
-    argv: list[str] = [interpreter, "-u", "-m", module]
-
-    # 按自省结果的声明顺序拼接，保证同样的参数得到同样的 argv(便于比对与复现)
+    # 先把所有参数校验并渲染完，**再**去解析解释器路径。
+    # 顺序很重要：环境没配好不该盖过「参数写错了」这个更具体的错误，
+    # 否则模型收到的是「SPRING_PYTHON 未设置」，会往完全错误的方向排查。
+    # 按自省结果的声明顺序拼接，保证同样的参数得到同样的 argv(便于比对与复现)。
+    rendered: list[str] = []
     for dest, spec in spec_map.items():
         if dest not in params:
             continue
         value = params[dest]
         if value is None:
             continue
-        argv.extend(_render_argument(dest, value, spec))
+        rendered.extend(_render_argument(dest, value, spec))
 
-    return argv
+    interpreter = str(python) if python else str(schema.spring_python())
+    return [interpreter, "-u", "-m", module, *rendered]
 
 
 def _validate_date_range(params: dict[str, Any], *, allow_long_span: bool) -> None:

@@ -14,12 +14,13 @@ dependencies = [
 ]
 
 # 安装后提供命令行入口 `etl-quant-mcp`，等价于 `python server.py`
-# server.py 属 M2，尚未创建；届时再放开入口点声明
-# [project.scripts]
-# etl-quant-mcp = "server:main"
+# 安装后提供命令行入口 `etl-quant-mcp`，等价于 `python server.py`
+[project.scripts]
+etl-quant-mcp = "server:main"
 
+# logs.py 属 M3，创建后加入本列表
 [tool.setuptools]
-py-modules = ["schema", "params", "runner"]
+py-modules = ["server", "schema", "params", "runner"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

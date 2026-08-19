@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 settings*.json
 .mcp*
+!.mcp.json.example
 .cache/
 tmp/
 log/
