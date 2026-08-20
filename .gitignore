@@ -8,5 +8,4 @@ settings*.json
 .cache/
 tmp/
 log/
-docs/
 .venv/
