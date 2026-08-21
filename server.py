@@ -493,7 +493,7 @@ def list_jobs(status: str | None = None, limit: int = 20) -> dict:
     """
     if status and status not in _ALL_STATUSES:
         return _error(f"未知状态 '{status}'；可选: {', '.join(sorted(_ALL_STATUSES))}")
-    jobs = [_view(j) for j in get_runner().list(status=status, limit=limit)]
+    jobs = [_view(j) for j in get_runner().list_jobs(status=status, limit=limit)]
     attention = [j["job_id"] for j in jobs if j["needs_attention"]]
     return {
         "ok": True,
@@ -694,7 +694,7 @@ def check_data_gaps(
 def _db_lock_hint() -> str | None:
     """DuckDB 单写者：有写任务在跑时只读连接打不开，提示调用方等它结束。"""
     try:
-        running = [j["job_id"] for j in get_runner().list(limit=50)
+        running = [j["job_id"] for j in get_runner().list_jobs(limit=50)
                    if j["status"] in (schema.STATUS_RUNNING, schema.STATUS_STALLED)]
     except Exception:                    # noqa: BLE001 提示信息拿不到不该盖过真实错误
         return None

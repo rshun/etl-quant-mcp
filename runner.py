@@ -1,6 +1,8 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：子进程调度 + 心跳监控 + 串行队列 + 状态持久化 + 取消
 #   2026-08-19  Claude  新增失败自动重试与批次查询，支撑分片断点续跑
+#   2026-08-21  Claude  Runner.list 改名 list_jobs：原名遮蔽内置 list，
+#                       在 Python < 3.14 上导致同类注解求值失败
 """ETL 子进程执行器。
 
 设计要点（对应文档 ADR-2/3/6 与第五节）：
@@ -209,8 +211,15 @@ class Runner:
                         if job_id in self._pending else None)
             return job.to_dict(queue_position=position)
 
-    def list(self, status: str | None = None, limit: int = 50) -> list[dict]:
-        """列出任务。`stalled` 置顶——它是最需要人看一眼的状态。"""
+    def list_jobs(self, status: str | None = None, limit: int = 50) -> list[dict]:
+        """列出任务。`stalled` 置顶——它是最需要人看一眼的状态。
+
+        方法名不叫 `list`：那会在类体作用域内遮蔽内置的 `list`，
+        而 Python 3.14 之前注解是**定义时立即求值**的，
+        同类中任何 `-> list[...]` 都会解析到这个方法上并抛
+        `TypeError: 'function' object is not subscriptable`。
+        见 tests/test_contract.py::test_no_builtin_shadowed_in_annotations。
+        """
         with self._lock:
             jobs = [self._jobs[j] for j in reversed(self._order)]
             pending = list(self._pending)

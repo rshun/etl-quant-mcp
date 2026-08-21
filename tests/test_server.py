@@ -92,7 +92,7 @@ def test_invalid_date_returns_structured_error(fake_schema, live_runner):
     result = server.etl_import_daily(begin="20261301", wait_seconds=0)
     assert result["ok"] is False
     assert "不是有效日期" in result["error"]
-    assert live_runner.list() == [], "参数非法时不该提交任务"
+    assert live_runner.list_jobs() == [], "参数非法时不该提交任务"
 
 
 def test_injection_in_codes_rejected(fake_schema, live_runner):
@@ -106,7 +106,7 @@ def test_injection_in_codes_rejected(fake_schema, live_runner):
                                      wait_seconds=0)
     assert result["ok"] is False
     assert "代码非法" in result["error"]
-    assert live_runner.list() == []
+    assert live_runner.list_jobs() == []
 
 
 def test_invalid_enum_rejected(fake_schema, live_runner):

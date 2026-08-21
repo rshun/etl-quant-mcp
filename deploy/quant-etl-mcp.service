@@ -29,7 +29,7 @@ Type=simple
 User=rshun
 Group=rshun
 WorkingDirectory=/home/rshun/src/etl-quant-mcp
-ExecStart=/home/rshun/src/venv_etl_mcp/bin/python /home/rshun/src/etl-quant-mcp/server.py
+ExecStart=/home/rshun/src/etl-quant-mcp/.venv/bin/python /home/rshun/src/etl-quant-mcp/server.py
 # ↑↑↑ 按实际情况修改这四行 ↑↑↑
 
 Environment=SPRING_DIR=/home/rshun/src/spring

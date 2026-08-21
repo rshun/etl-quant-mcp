@@ -282,3 +282,65 @@ def test_validate_environment_checks_introspection_entrypoint(tmp_path, monkeypa
     # 两个都齐了才通过
     (root / "tools" / "check_daily.py").write_text("", encoding="utf-8")
     schema.validate_environment()
+
+
+# ── 跨 Python 版本可移植性 ────────────────────────────────────────────────────
+
+def test_no_builtin_shadowed_in_annotations():
+    """反例(关键): 同一作用域内不得「定义了与内置同名的东西，又在注解里用那个内置」。
+
+    Python 3.14 起注解才是延迟求值（PEP 649）；3.10–3.13 上注解在**定义时立即求值**，
+    此时类体里的 `def list(...)` 会遮蔽内置 `list`，同类中任何 `-> list[dict]`
+    都会抛 `TypeError: 'function' object is not subscriptable`——**整个模块直接 import 失败**。
+
+    这个 bug 在 3.14 上完全不可见，靠跑测试发现不了，只能靠静态检查。
+    `pyproject.toml` 声明 requires-python >= 3.10，这条就是那句声明的守卫。
+    （真实案例：Runner.list 曾因此让服务在 Debian 上起不来。）
+    """
+    import ast
+    import builtins
+    from pathlib import Path
+
+    builtin_names = set(dir(builtins))
+    root = Path(__file__).resolve().parents[1]
+
+    def defined_here(body) -> set[str]:
+        names = set()
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names.add(node.target.id)
+        return names
+
+    def annotated_here(body) -> set[str]:
+        used = set()
+        for node in body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            annotations = [a.annotation for a in node.args.args + node.args.kwonlyargs
+                           if a.annotation]
+            if node.returns:
+                annotations.append(node.returns)
+            for annotation in annotations:
+                used.update(n.id for n in ast.walk(annotation) if isinstance(n, ast.Name))
+        return used
+
+    offenders = []
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # 有 `from __future__ import annotations` 的模块注解恒为惰性，可豁免
+        if any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
+               and any(a.name == "annotations" for a in n.names) for n in tree.body):
+            continue
+        scopes = [("<module>", tree.body)]
+        scopes += [(n.name, n.body) for n in tree.body if isinstance(n, ast.ClassDef)]
+        for scope, body in scopes:
+            for name in sorted(defined_here(body) & builtin_names & annotated_here(body)):
+                offenders.append(f"{path.name}:{scope} 定义了 '{name}'，"
+                                 f"同作用域注解又用到内置 '{name}'")
+
+    assert not offenders, "存在会在 Python < 3.14 上 import 失败的名字遮蔽:\n  " + \
+                          "\n  ".join(offenders)

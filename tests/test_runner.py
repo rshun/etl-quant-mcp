@@ -346,7 +346,7 @@ def test_list_puts_stalled_first(runner):
     stuck = runner.submit("fake", _script("import time; print('s'); time.sleep(30)"),
                           stall_timeout=1, max_runtime=60)
     _wait_status(runner, stuck, schema.STATUS_STALLED, timeout=10)
-    assert runner.list()[0]["job_id"] == stuck
+    assert runner.list_jobs()[0]["job_id"] == stuck
     runner.cancel(stuck, force=True)
 
 
@@ -354,8 +354,8 @@ def test_list_filters_by_status(runner):
     """正例: 按状态过滤"""
     job_id = runner.submit("fake", _script("print('ok')"))
     _wait_terminal(runner, job_id)
-    assert [j["job_id"] for j in runner.list(status=schema.STATUS_SUCCEEDED)] == [job_id]
-    assert runner.list(status=schema.STATUS_STALLED) == []
+    assert [j["job_id"] for j in runner.list_jobs(status=schema.STATUS_SUCCEEDED)] == [job_id]
+    assert runner.list_jobs(status=schema.STATUS_STALLED) == []
 
 
 def test_get_unknown_job_raises(runner):

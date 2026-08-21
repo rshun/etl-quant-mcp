@@ -31,7 +31,7 @@ ETL 调度 MCP 服务（服务名 `quant-etl`）。把 [spring](https://github.c
 依赖只有 `mcp` —— 重活都在 spring 的解释器里跑，本仓库不需要 duckdb / pandas / akshare。
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ```
 
 ## 配置
