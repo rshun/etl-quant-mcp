@@ -604,3 +604,135 @@ def test_check_data_gaps_timeout(live_runner):
         result = server.check_data_gaps(begin="20260817", timeout_seconds=300)
     assert result["ok"] is False
     assert "超时" in result["error"]
+
+
+# ── 传输方式（客户端与服务端可分属不同用户）────────────────────────────────────
+# ADR-2 定的是「ETL 用子进程调」，与「客户端怎么连服务端」是两条独立的轴。
+# stdio 下服务端由客户端拉起、必然同用户；HTTP 下服务端可以常驻在数据管道
+# 属主名下，客户端只要连得上端口即可，文件系统权限一点不用动。
+
+@pytest.fixture
+def clean_transport_env(monkeypatch):
+    for key in ("ETL_MCP_TRANSPORT", "ETL_MCP_HOST", "ETL_MCP_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_transport_defaults_to_stdio(clean_transport_env):
+    """正例(关键): 默认仍是 stdio——已有的开发与单机用法不受任何影响"""
+    transport, host, port = server.transport_settings()
+    assert transport == server.TRANSPORT_STDIO
+    assert host == "127.0.0.1"
+    assert port == server.DEFAULT_HTTP_PORT
+
+
+def test_transport_http_opt_in(clean_transport_env, monkeypatch):
+    """正例: 显式设置才切到 HTTP"""
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "streamable-http")
+    assert server.transport_settings()[0] == server.TRANSPORT_HTTP
+
+
+def test_transport_accepts_sse(clean_transport_env, monkeypatch):
+    """正例: sse 也支持（较老的客户端可能只认它）"""
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "SSE")
+    assert server.transport_settings()[0] == server.TRANSPORT_SSE
+
+
+def test_host_and_port_overridable(clean_transport_env, monkeypatch):
+    """正例: 地址与端口可覆盖"""
+    monkeypatch.setenv("ETL_MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("ETL_MCP_PORT", "9999")
+    _, host, port = server.transport_settings()
+    assert (host, port) == ("0.0.0.0", 9999)
+
+
+def test_unknown_transport_rejected(clean_transport_env, monkeypatch):
+    """反例: 未知传输方式必须拒绝，不能悄悄退回默认值"""
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "websocket")
+    with pytest.raises(ValueError, match="未知的传输方式"):
+        server.transport_settings()
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "70000", "-1"])
+def test_invalid_port_rejected(clean_transport_env, monkeypatch, bad):
+    """反例: 非法端口必须拒绝"""
+    monkeypatch.setenv("ETL_MCP_PORT", bad)
+    with pytest.raises(ValueError):
+        server.transport_settings()
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("127.0.0.1", True), ("127.0.0.53", True), ("localhost", True),
+    ("::1", True), ("LOCALHOST", True),
+    ("0.0.0.0", False), ("192.168.1.5", False), ("", False),
+])
+def test_loopback_detection(host, expected):
+    """正例/反例: 回环判定——它决定要不要发出暴露面告警"""
+    assert server.is_loopback(host) is expected
+
+
+def test_main_rejects_bad_transport_before_starting(clean_transport_env, monkeypatch):
+    """反例: 配置错误应在启动时就返回 1，不进入 run()"""
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "nope")
+    with patch.object(schema, "validate_environment"), \
+         patch.object(server.mcp, "run") as run:
+        assert server.main() == 1
+    run.assert_not_called()
+
+
+def test_main_stdio_does_not_touch_network_settings(clean_transport_env):
+    """正例: stdio 模式不应改动监听设置"""
+    before = (server.mcp.settings.host, server.mcp.settings.port)
+    with patch.object(schema, "validate_environment"), \
+         patch.object(server.mcp, "run") as run:
+        assert server.main() == 0
+    assert (server.mcp.settings.host, server.mcp.settings.port) == before
+    run.assert_called_once_with(transport=server.TRANSPORT_STDIO)
+
+
+def test_main_http_applies_host_and_port(clean_transport_env, monkeypatch):
+    """正例(核心): HTTP 模式把地址端口装进 FastMCP 后再启动"""
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("ETL_MCP_PORT", "8899")
+    original = (server.mcp.settings.host, server.mcp.settings.port)
+    try:
+        with patch.object(schema, "validate_environment"), \
+             patch.object(server.mcp, "run") as run:
+            assert server.main() == 0
+        assert server.mcp.settings.host == "127.0.0.1"
+        assert server.mcp.settings.port == 8899
+        run.assert_called_once_with(transport=server.TRANSPORT_HTTP)
+    finally:
+        server.mcp.settings.host, server.mcp.settings.port = original
+
+
+def test_main_warns_when_binding_non_loopback(clean_transport_env, monkeypatch, capsys):
+    """正例(安全关键): 绑非回环地址必须告警。
+
+    本服务不做鉴权，「谁能连上这个端口」就是它唯一的授权边界。
+    绑到 0.0.0.0 等于把 ETL 写入面开放给整个网段，这件事必须说出来。
+    """
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("ETL_MCP_HOST", "0.0.0.0")
+    original = (server.mcp.settings.host, server.mcp.settings.port)
+    try:
+        with patch.object(schema, "validate_environment"), \
+             patch.object(server.mcp, "run"):
+            server.main()
+        stderr = capsys.readouterr().err
+        assert "不是回环地址" in stderr
+        assert "不做鉴权" in stderr
+    finally:
+        server.mcp.settings.host, server.mcp.settings.port = original
+
+
+def test_main_does_not_warn_on_loopback(clean_transport_env, monkeypatch, capsys):
+    """反例: 绑回环时不该发告警，否则告警会被当噪音忽略"""
+    monkeypatch.setenv("ETL_MCP_TRANSPORT", "streamable-http")
+    original = (server.mcp.settings.host, server.mcp.settings.port)
+    try:
+        with patch.object(schema, "validate_environment"), \
+             patch.object(server.mcp, "run"):
+            server.main()
+        assert "不是回环地址" not in capsys.readouterr().err
+    finally:
+        server.mcp.settings.host, server.mcp.settings.port = original

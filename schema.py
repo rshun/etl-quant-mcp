@@ -194,3 +194,15 @@ def validate_environment() -> None:
         relative = Path(module.replace(".", "/") + ".py")
         if not (root / relative).is_file():
             raise RuntimeError(f"程序 '{program}' 的模块文件不存在: {root / relative}")
+
+    # 自省出口与完整性检查工具同样要在启动时确认。
+    # 少了这两项检查，spring 若停在缺少它们的旧分支上，要等到第一次调 Tool
+    # 才会以「No module named ...」的形式暴露——那时排查方向已经被带偏了。
+    for label, module in (("参数自省出口", DESCRIBE_MODULE),
+                          ("数据完整性检查工具", CHECK_MODULE)):
+        relative = Path(module.replace(".", "/") + ".py")
+        if not (root / relative).is_file():
+            raise RuntimeError(
+                f"{label} '{module}' 的文件不存在: {root / relative}；"
+                f"确认 SPRING_DIR 指向的检出包含该文件（分支是否过旧？）"
+            )

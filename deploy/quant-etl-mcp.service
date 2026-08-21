@@ -1,0 +1,59 @@
+# quant-etl MCP 服务（streamable-http 常驻）
+#
+# 用途：让 Claude 客户端与 ETL 数据管道**分属不同用户**时仍能协作。
+#   服务端以数据管道属主（下例为 rshun）运行 —— ETL 子进程因此继承正确身份，
+#   config.yaml 里 `~/data/quant.db` 的 `~` 自动展开到管道属主的家目录。
+#   客户端只需连 127.0.0.1 上的端口，**对管道属主的文件系统零访问**。
+#
+# 安装：
+#   sudo cp deploy/quant-etl-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now quant-etl-mcp
+#   systemctl status quant-etl-mcp
+#   journalctl -u quant-etl-mcp -f
+#
+# 客户端 .mcp.json（任意用户均可，无需文件系统权限）：
+#   { "mcpServers": { "quant-etl": { "url": "http://127.0.0.1:8787/mcp" } } }
+#
+# ⚠ 本服务不做鉴权：「谁能连上这个端口」就是它唯一的授权边界。
+#   ETL_MCP_HOST 保持 127.0.0.1，改成 0.0.0.0 等于把 ETL 写入面开放给整个网段。
+
+[Unit]
+Description=quant-etl MCP server (ETL scheduling over streamable-http)
+After=network.target
+
+[Service]
+Type=simple
+
+# ↓↓↓ 按实际情况修改这四行 ↓↓↓
+User=rshun
+Group=rshun
+WorkingDirectory=/home/rshun/src/etl-quant-mcp
+ExecStart=/home/rshun/src/venv_etl_mcp/bin/python /home/rshun/src/etl-quant-mcp/server.py
+# ↑↑↑ 按实际情况修改这四行 ↑↑↑
+
+Environment=SPRING_DIR=/home/rshun/src/spring
+Environment=SPRING_PYTHON=/home/rshun/src/venv_stock/bin/python3
+Environment=ETL_MCP_TRANSPORT=streamable-http
+Environment=ETL_MCP_HOST=127.0.0.1
+Environment=ETL_MCP_PORT=8787
+# 可选：任务元数据与日志目录，默认 $SPRING_DIR/log
+# Environment=SPRING_LOG_DIR=/home/rshun/src/spring/log
+
+Restart=on-failure
+RestartSec=5
+
+# 服务需要读写 spring 目录与数据库，因此不能用 ProtectHome；
+# 下面几项是在保留必要访问的前提下能加的收敛。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -246,3 +246,39 @@ def test_snapshot_preserves_declaration_order(name):
     dests = list(SNAPSHOT[name]["arguments"])
     assert dests[:4] == ["begin", "end", "codes", "exchanges"], \
         f"{name} 的参数顺序被改动过: {dests}"
+
+
+# ── 启动期环境校验 ────────────────────────────────────────────────────────────
+
+def test_validate_environment_checks_introspection_entrypoint(tmp_path, monkeypatch):
+    """反例(关键): spring 检出缺少 describe_cli 时必须在启动时报错。
+
+    少了这条检查，spring 若停在旧分支上，故障会推迟到第一次调 Tool，
+    表现为「No module named tools.describe_cli」——排查方向会被带偏到
+    PYTHONPATH / cwd 上去，而真实原因是检出的分支不对。
+    """
+    root = tmp_path / "spring"
+    for module in schema.PROGRAMS.values():
+        path = root / (module.replace(".", "/") + ".py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    monkeypatch.setenv("SPRING_DIR", str(root))
+    monkeypatch.setenv("SPRING_PYTHON", str(interpreter))
+
+    with pytest.raises(RuntimeError, match="describe_cli"):
+        schema.validate_environment()
+
+    # 补上自省出口后，还缺 check_daily
+    describe = root / "tools" / "describe_cli.py"
+    describe.parent.mkdir(parents=True, exist_ok=True)
+    describe.write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="check_daily"):
+        schema.validate_environment()
+
+    # 两个都齐了才通过
+    (root / "tools" / "check_daily.py").write_text("", encoding="utf-8")
+    schema.validate_environment()

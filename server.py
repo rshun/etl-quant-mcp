@@ -2,6 +2,7 @@
 #   2026-08-19  Claude  新建：FastMCP 入口，注册 ETL 执行、任务管理与自省 Tool
 #   2026-08-19  Claude  新增日志类 Tool：list_etl_logs / read_etl_log / summarize_etl_log
 #   2026-08-19  Claude  新增分片执行、失败重试与 check_data_gaps
+#   2026-08-19  Claude  支持 streamable-http 传输，使客户端与服务端可分属不同用户
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -17,6 +18,19 @@
 仍然保留，只是落在**校验层**：argv 由 params.py 依据运行时自省结果构造与校验，
 spring 改了枚举或删了参数，这里会立刻报错而不是默默拼出一个错误的命令行。
 模型需要看当前真实参数时，调 describe_etl_program。
+
+关于传输方式（2026-08-19 补充，对 ADR-2 的澄清）：
+ADR-2 决定的是「**怎么调 ETL**」——子进程而非进程内。这与「**客户端怎么连服务端**」
+是两条互不相关的轴，早期把两者混为一谈，默认了 stdio。
+
+stdio 模式下服务端由客户端进程拉起，两者必然同用户；而 ETL 需要以数据管道属主
+的身份运行（`~/data/quant.db` 的 `~` 按运行用户展开）。当 Claude 客户端与数据
+管道分属不同用户时，stdio 就把这个约束传导成了「客户端也必须是管道属主」。
+
+改用 HTTP 后，服务端可作为常驻进程以管道属主身份运行，客户端只需能连上
+loopback 端口——**文件系统权限一点都不用动**，客户端能做的事恰好等于
+本文件暴露的这些 Tool。ADR-2 的四条理由不受任何影响：ETL 仍是子进程、
+仍可 kill、写锁仍随子进程释放。
 """
 import json
 import os
@@ -40,6 +54,55 @@ except Exception as e:  # noqa: BLE001
 mcp = FastMCP(schema.SERVER_NAME)
 
 DEFAULT_WAIT_SECONDS = 30
+
+# ---- 传输方式 ----
+TRANSPORT_STDIO = "stdio"
+TRANSPORT_HTTP = "streamable-http"
+TRANSPORT_SSE = "sse"
+TRANSPORTS = (TRANSPORT_STDIO, TRANSPORT_HTTP, TRANSPORT_SSE)
+
+# 默认只绑回环。本服务的授权边界就是「谁能连上这个端口」——
+# 它没有鉴权，绑到非回环地址等于把 ETL 写入面开放给整个网段。
+DEFAULT_HTTP_HOST = "127.0.0.1"
+DEFAULT_HTTP_PORT = 8787
+
+_LOOPBACK_NAMES = frozenset({"localhost", "::1", "[::1]"})
+
+
+def is_loopback(host: str) -> bool:
+    """判断监听地址是否只对本机可见。"""
+    text = (host or "").strip().lower()
+    if text in _LOOPBACK_NAMES:
+        return True
+    return text.startswith("127.")
+
+
+def transport_settings() -> tuple[str, str, int]:
+    """从环境变量解析传输方式与监听地址。
+
+    ETL_MCP_TRANSPORT  stdio(默认) | streamable-http | sse
+    ETL_MCP_HOST       默认 127.0.0.1
+    ETL_MCP_PORT       默认 8787
+
+    默认仍是 stdio：开发、测试与单机同用户的场景不受任何影响。
+    """
+    transport = (os.environ.get("ETL_MCP_TRANSPORT") or TRANSPORT_STDIO).strip().lower()
+    if transport not in TRANSPORTS:
+        raise ValueError(
+            f"未知的传输方式 '{transport}'；可选: {', '.join(TRANSPORTS)}"
+        )
+
+    host = (os.environ.get("ETL_MCP_HOST") or DEFAULT_HTTP_HOST).strip()
+
+    raw_port = (os.environ.get("ETL_MCP_PORT") or "").strip()
+    try:
+        port = int(raw_port) if raw_port else DEFAULT_HTTP_PORT
+    except ValueError:
+        raise ValueError(f"ETL_MCP_PORT 不是合法端口号: '{raw_port}'") from None
+    if not 1 <= port <= 65535:
+        raise ValueError(f"ETL_MCP_PORT 超出范围: {port}")
+
+    return transport, host, port
 
 _runner: runner_mod.Runner | None = None
 
@@ -673,10 +736,23 @@ _ALL_STATUSES = frozenset({
 def main() -> int:
     try:
         schema.validate_environment()
-    except RuntimeError as e:
+        transport, host, port = transport_settings()
+    except (RuntimeError, ValueError) as e:
         print(f"[quant-etl] 启动失败：{e}", file=sys.stderr)
         return 1
-    mcp.run()
+
+    if transport != TRANSPORT_STDIO:
+        mcp.settings.host = host
+        mcp.settings.port = port
+        if not is_loopback(host):
+            print(
+                f"[quant-etl] ⚠ 监听地址 {host} 不是回环地址。本服务不做鉴权，"
+                f"能连上此端口即可触发 ETL 写库。确认这是你要的。",
+                file=sys.stderr,
+            )
+        print(f"[quant-etl] {transport} 监听 {host}:{port}", file=sys.stderr)
+
+    mcp.run(transport=transport)
     return 0
 
 

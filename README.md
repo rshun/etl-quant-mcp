@@ -18,6 +18,7 @@ ETL 调度 MCP 服务（服务名 `quant-etl`）。把 [spring](https://github.c
 | | |
 |---|---|
 | **子进程而非进程内调用** | ETL 卡死时必须能 kill 掉它而不拖死本服务 |
+| **传输方式可选** | stdio（默认）或 HTTP。HTTP 让客户端与 ETL 分属不同用户成为可能，见下 |
 | **心跳判定卡死** | reader 线程逐行读输出并打时间戳，静默超阈值即判 `stalled` |
 | **`stalled` 不是终态** | 先报警不动手，由人或模型决定继续等还是杀；只有超 `max_runtime` 才自动终止 |
 | **强制无缓冲** | 固定注入 `PYTHONUNBUFFERED=1` 并配合 argv 里的 `-u`。少了它，pipe 的块缓冲会让正常运行被误判为卡死 |
@@ -49,7 +50,46 @@ pip install -r requirements.txt
 本服务通过指定 venv 解释器 + `cwd` 已自动满足（`python -m` 会把 CWD 放进 `sys.path[0]`），
 多包一层 shell 只会多一层退出码传递风险。
 
-配置有误时服务**启动即报错**，不会拖到第一次调用 Tool。
+配置有误时服务**启动即报错**，不会拖到第一次调用 Tool——包括 `SPRING_DIR` 指向的检出
+是否真的包含 6 个 ETL 模块、`tools/describe_cli.py` 与 `tools/check_daily.py`
+（分支过旧是个真实会踩的坑）。
+
+## 传输方式：stdio 还是 HTTP
+
+默认 **stdio**：服务端由 MCP 客户端拉起，两者同进程树、同用户。单机同用户的场景用这个就够了。
+
+但 stdio 有一个隐含约束：**服务端必然与客户端同用户**。而 ETL 必须以数据管道属主的身份
+运行——`config.yaml` 里 `~/data/quant.db` 的 `~` 是按运行用户展开的。所以当 Claude 客户端
+与数据管道分属不同用户时（例如 Claude 跑在 `claude` 下、ETL 属于 `rshun`），
+stdio 会把这个约束传导成「客户端也必须是管道属主」，只能靠迁移用户或放宽文件权限来化解。
+
+**改用 HTTP 就没有这个问题**：
+
+```
+claude 用户  ──HTTP──▶  MCP 服务（rshun 身份常驻）──subprocess──▶  ETL ──▶  quant.db
+   ↑                            ↑
+只能调 13 个 Tool          文件系统权限完全不用改
+```
+
+客户端能做的事**恰好等于**本服务暴露的 Tool——它拿不到 shell、拿不到任意 SQL、
+也读不到 `quant.db`。这比放宽文件权限的隔离性更好。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `ETL_MCP_TRANSPORT` | `stdio` | `streamable-http` / `sse` |
+| `ETL_MCP_HOST` | `127.0.0.1` | **本服务不做鉴权**，绑非回环地址等于把 ETL 写入面开放给整个网段；真要这么做会在 stderr 告警 |
+| `ETL_MCP_PORT` | `8787` | |
+
+客户端侧的 `.mcp.json` 相应改成：
+
+```json
+{ "mcpServers": { "quant-etl": { "url": "http://127.0.0.1:8787/mcp" } } }
+```
+
+常驻部署见 `deploy/quant-etl-mcp.service`（systemd 模板，`User=` 设成管道属主）。
+
+顺带一个好处：常驻之后**任务历史跨客户端会话保留**，重启 Claude 也能用 `list_jobs`
+看到今天跑过什么。stdio 模式下服务随客户端进程退出，内存里的任务状态就没了。
 
 ## Tool 一览（13 个）
 
