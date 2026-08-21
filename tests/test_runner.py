@@ -520,3 +520,41 @@ def test_retrying_job_never_publishes_terminal_status(run_dir):
                  if a < 3 and st in schema.TERMINAL_STATUSES]
     assert not premature, f"还要重试却已呈现为终态: {premature}"
     assert (3, schema.STATUS_FAILED) in samples, "最终失败状态应被落盘"
+
+
+def test_status_during_termination_is_not_terminal_when_retry_pending(run_dir):
+    """反例(关键竞态·另一半): 「正在终止」的那段时间不得对外呈现为终态。
+
+    终止流程是 SIGTERM → 等宽限期 → SIGKILL，最长可达数秒。若监控线程在发起终止
+    **之前**就把 job.status 写成 killed_stalled，这几秒里 get_job 看到的就是终态——
+    而此刻可能还要重试。调用方据此会以为任务结束、自行去补数，与执行器的重试撞车。
+
+    这里挂钩 _stop_process 采样，因为那正是窗口所在；轮询版本只能靠撞，
+    实测约 40% 漏判（`test_killed_stalled_job_is_retried` 曾因此偶发红）。
+    """
+    samples: list[tuple[int, str]] = []
+    original = Runner._stop_process
+
+    def spy(self, job, *, force, reason):
+        with self._lock:
+            samples.append((job.attempt, job.status))
+        return original(self, job, force=force, reason=reason)
+
+    with patch.object(Runner, "_stop_process", spy):
+        r = Runner(jobs_dir=run_dir, cwd=run_dir, poll_interval=0.05,
+                   terminate_grace=1.0)
+        try:
+            job_id = r.submit(
+                "fake", _script("import time; print('start'); time.sleep(30)"),
+                retries=1, stall_timeout=30, max_runtime=1)
+            info = _wait_terminal(r, job_id, timeout=40)
+        finally:
+            r.shutdown()
+
+    assert info["status"] == schema.STATUS_KILLED_STALLED
+    assert info["attempt"] == 2, "超硬上限被终止属于可重试，应跑满两次"
+    assert samples, "应至少发起过一次终止"
+
+    premature = [(a, st) for a, st in samples
+                 if a < 2 and st in schema.TERMINAL_STATUSES]
+    assert not premature, f"终止过程中过早呈现终态: {premature}"

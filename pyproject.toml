@@ -7,6 +7,11 @@ name = "etl-quant-mcp"
 version = "0.1.0"
 description = "ETL 调度 MCP 服务：以子进程方式驱动 spring 的 ETL 程序，提供卡死检测与断点续跑"
 readme = "README.md"
+# 下限 3.10 来自 PEP 604 的 `X | Y` 联合类型注解。
+# 实测环境：3.11.2（Debian 12 生产）与 3.14.3（macOS 开发）。
+# 注意 3.14 起注解才是延迟求值（PEP 649），3.10–3.13 上定义时立即求值——
+# 因此不得在同一作用域内定义与内置同名的东西又在注解里使用该内置，
+# 由 tests/test_contract.py::test_no_builtin_shadowed_in_annotations 守卫。
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [

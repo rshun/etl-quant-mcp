@@ -30,6 +30,14 @@ ETL 调度 MCP 服务（服务名 `quant-etl`）。把 [spring](https://github.c
 
 依赖只有 `mcp` —— 重活都在 spring 的解释器里跑，本仓库不需要 duckdb / pandas / akshare。
 
+需要 Python **3.10+**（用到 PEP 604 的 `X | Y` 注解）。实测通过的版本：
+**3.11.2**（Debian 12，生产）与 **3.14.3**（macOS，开发）。
+
+> 3.14 起注解才是延迟求值（PEP 649），3.10–3.13 上是**定义时立即求值**。
+> 这个差异会让「同作用域内定义了与内置同名的东西、又在注解里用该内置」这类问题
+> 在 3.14 上完全不可见，却在旧版本上直接 import 失败。
+> `tests/test_contract.py::test_no_builtin_shadowed_in_annotations` 用静态扫描守着这条。
+
 ```bash
 python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ```

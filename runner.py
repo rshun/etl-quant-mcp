@@ -3,6 +3,8 @@
 #   2026-08-19  Claude  新增失败自动重试与批次查询，支撑分片断点续跑
 #   2026-08-21  Claude  Runner.list 改名 list_jobs：原名遮蔽内置 list，
 #                       在 Python < 3.14 上导致同类注解求值失败
+#   2026-08-21  Claude  修完竞态的另一半：_monitor 不再直接发布终态，
+#                       否则「正在终止」的那一秒会被外部当作任务已结束
 """ETL 子进程执行器。
 
 设计要点（对应文档 ADR-2/3/6 与第五节）：
@@ -74,6 +76,9 @@ class Job:
         self._last_output_mono: float | None = None
         self._cancel_requested = False
         self._cancel_force = False
+        # 监控线程判定要终止时，把「终止后应记为什么状态」放这里，而**不是**直接写 job.status。
+        # 直接写会在「终止进程」这段时间里对外呈现一个终态，而此刻还可能要重试。
+        self._stop_outcome: str | None = None
         self._done = threading.Event()
 
     # -- 派生量 ------------------------------------------------------------
@@ -356,10 +361,9 @@ class Runner:
         code = proc.poll()
         with self._lock:
             job.exit_code = code
-            if job.status in (schema.STATUS_CANCELLED, schema.STATUS_KILLED_STALLED):
-                outcome = job.status
-            else:
-                outcome = schema.status_from_exit_code(code if code is not None else -1)
+            # 监控线程若判定过终止原因(取消/超硬上限)，以它为准；否则看退出码。
+            outcome = job._stop_outcome or schema.status_from_exit_code(
+                code if code is not None else -1)
 
             # 判定与状态落定必须在同一把锁里一次做完。分开做会留下一个窗口，
             # 让 wait() 或 get_job() 看到一个「其实还要再跑」的终态——
@@ -433,9 +437,11 @@ class Runner:
 
             if should_stop:
                 with self._lock:
-                    job.status = new_status
+                    # 只记录意图。终态由 _run 的原子块统一落定——
+                    # 在这里写 job.status 会让「正在终止」的这一秒对外看起来已经结束了，
+                    # 而此刻还可能要重试，调用方据此会重复补数。
+                    job._stop_outcome = new_status
                     job.error = break_reason
-                self._persist(job)
                 self._stop_process(job, force=force, reason=break_reason)
                 return
 
@@ -484,6 +490,7 @@ class Runner:
         job._proc = None
         job._start_mono = None
         job._last_output_mono = None
+        job._stop_outcome = None
         self._pending.append(job.job_id)
 
     def batch(self, batch_id: str) -> list[dict]:
