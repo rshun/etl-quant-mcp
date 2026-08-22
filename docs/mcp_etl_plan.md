@@ -9,7 +9,7 @@
 | MCP 服务名 | `quant-etl`（与只读侧 `quant-readonly` 对称） |
 | 依赖的数据管道仓库 | `spring`（`/Users/shun/Projects/spring`） |
 | 创建日期 | 2026-08-18 |
-| 当前状态 | **全部阶段完成（S1–S3 / M1–M5）。剩余事项见第十五节** |
+| 当前状态 | **已交付并部署上线**（S1–S3 / M1–M6）。生产环境 Debian，systemd 常驻。剩余事项见第十五节 |
 
 ---
 
@@ -565,8 +565,6 @@ etl-quant-mcp/
 - [x] **验证**：全量 414 passed / 4 skipped；变异测试——把写连接挪回下载前 → 3 项红
 
 > **成果**：三个下载型 ETL 现已统一为「先下载、后取写连接」。下载阶段（唯一会卡死的阶段）不再持有任何写锁，卡死时可放心 kill，5.5 的 kill 策略表随之简化。
-- [ ] `util/myutil.py` 修正 `configure_etl_logging` docstring 的 `~/log/` 笔误
-- [ ] 复核 akshare / tdx 路径是否也有无超时的网络调用
 
 ### M1 MCP 骨架
 
@@ -771,6 +769,24 @@ argv 仍由 `params.py` 依据运行时自省结果构造与校验，spring 改�
 | `test_integration.py` | 16 | **是** | 契约漂移、真实子进程、真实日志 |
 
 集成测试里只放**必须凑齐两个仓库才能验证**的事，纯逻辑一律不放进去。
+
+### M6 部署上线【2026-08-22 完成】
+
+- [x] `deploy/quant-etl-mcp.service`：systemd 常驻单元
+- [x] 生产部署到 Debian，以数据管道属主 `rshun` 运行；客户端对其文件系统零访问
+- [x] 传输层 `streamable-http`，监听 `127.0.0.1:8787`
+- [x] **修复 `Runner.list` 遮蔽内置 `list`**（`76a30e2`）——生产 Python 3.11.2 上同类注解 `-> list[dict]` 解析到该方法并抛 `TypeError`，模块 import 失败、服务起不来
+- [x] 新增 AST 静态守卫 `test_no_builtin_shadowed_in_annotations`
+- [x] **修复终止过程中对外呈现终态**（`7aed503`）——SIGTERM → 宽限期 → SIGKILL 最长数秒，其间 `get_job` 显示「已结束」，会诱使调用方与执行器的重试撞车
+- [x] 记录实测通过的 Python 版本：生产 3.11.2 / 开发 3.14.3
+- [x] venv 约定改为项目内 `.venv`
+- [x] 用户确认部署成功（2026-08-22）
+- [ ] 夜跑脚本 `fetchData()` 仍不检查退出码（见 15.2）——MCP 侧已能自判，但 cron 链路仍是静默失败
+
+> **本阶段最大的教训：开发机与生产机的 Python 版本差异会掩盖真实缺陷。**
+> 3.14 的 PEP 649 延迟求值让 `Runner.list` 的遮蔽问题在开发机上完全不可见，
+> 测试全绿、服务却在生产起不来。这类问题**在新版本上跑测试永远发现不了**，
+> 只能靠静态检查——这正是新增 AST 守卫而非普通用例的原因。
 
 ---
 
@@ -1009,3 +1025,6 @@ fetchData()
 | 2026-08-19 | Claude | **M5 完成**：契约快照（75 项）与集成测试（16 项）；README 补齐；spring README 增补写入侧小节；本文件纳入版本管理。254 + 16 passed |
 | 2026-08-21 | Claude | **新增 ADR-2b**：支持 streamable-http 传输，使客户端与 ETL 可分属不同用户，无需改动任何文件系统权限。真实客户端连通验证通过（13 个 Tool、经 HTTP 跑完一次 ETL）。277 passed |
 | 2026-08-21 | Claude | `validate_environment` 补查 `describe_cli` 与 `check_daily`：spring 检出停在旧分支时，原先要等到第一次调 Tool 才以「No module named」暴露，排查方向会被带偏 |
+| 2026-08-21 | Claude | **修复生产起不来**：`Runner.list` 遮蔽内置 `list`，Python < 3.14 上同类注解 `-> list[dict]` 解析到该方法而抛 `TypeError`；改名 `list_jobs` 并新增 AST 静态守卫（此类缺陷在 3.14 上跑测试无法发现） |
+| 2026-08-21 | Claude | **修复终止竞态**：`_monitor` 在发起终止前即写终态，SIGTERM→宽限期→SIGKILL 期间对外呈现「已结束」，与待重试状态冲突；改为只记录终止意图，终态由 `_run` 原子块统一落定 |
+| 2026-08-22 | Claude | **M6 部署上线**：systemd 常驻（streamable-http，127.0.0.1:8787，以管道属主运行），用户确认部署成功；头部状态改为「已交付并部署上线」；清理 S3 小节两行遗留未勾选重复项 |
