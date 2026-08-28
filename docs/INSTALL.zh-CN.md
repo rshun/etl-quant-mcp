@@ -455,5 +455,5 @@ sudo systemctl daemon-reload
 
 ## 十四、了解更多
 
-`README.md` 讲设计思路。`docs/mcp_etl_plan.md` 是完整的开发记录：
+`../README.md` 讲设计思路。`mcp_etl_plan.md` 是完整的开发记录：
 需求背景、架构决策（ADR）、与 spring 之间的契约、以及卡死检测的设计推演。

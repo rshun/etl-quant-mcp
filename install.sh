@@ -78,7 +78,7 @@ EXAMPLE
       --spring-python /home/rshun/src/venv_stock/bin/python3 \
       --port 8787
 
-The service must run as the user that owns the ETL data. See INSTALL.md.
+The service must run as the user that owns the ETL data. See docs/INSTALL.md.
 USAGE
 }
 
@@ -267,7 +267,7 @@ mkdir -p "$INSTALL_DIR/deploy"
 #
 # The service MUST run as the user that owns the ETL data. spring resolves its
 # database path with ~ expansion, so a different user silently writes to a
-# different database file. See INSTALL.md, "Why the service user matters".
+# different database file. See docs/INSTALL.md, "Why the service user matters".
 
 [Unit]
 Description=quant-etl MCP server (ETL scheduling for spring)
@@ -350,5 +350,5 @@ $SERVICE_USER — that is the whole point of the HTTP transport):
 NEXT
 fi
 
-echo "Full documentation: $INSTALL_DIR/INSTALL.md"
+echo "Full documentation: $INSTALL_DIR/docs/INSTALL.md  (中文: docs/INSTALL.zh-CN.md)"
 echo

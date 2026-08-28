@@ -28,7 +28,7 @@ ETL 调度 MCP 服务（服务名 `quant-etl`）。把 [spring](https://github.c
 
 ## 安装
 
-> 部署到服务器请用 **[`INSTALL.zh-CN.md`](INSTALL.zh-CN.md)**（中文）或 **[`INSTALL.md`](INSTALL.md)**（English）+ `./install.sh`：
+> 部署到服务器请用 **[`docs/INSTALL.zh-CN.md`](docs/INSTALL.zh-CN.md)**（中文）或 **[`docs/INSTALL.md`](docs/INSTALL.md)**（English）+ `./install.sh`：
 > 它会校验前置条件、建 venv、验证跨仓调用、并按你的路径和端口生成 systemd unit。
 > 下面是手工安装的说明。
 
@@ -222,5 +222,8 @@ python -m tools.describe_cli --all   # 在 spring 目录下运行，再把日期
 
 ## 文档
 
-`docs/mcp_etl_plan.md` 是完整的开发说明与进度记录：需求背景、架构决策（ADR）、
-spring 侧契约、卡死检测设计、分阶段任务与变更记录。
+| 文档 | 内容 |
+|---|---|
+| [`docs/INSTALL.zh-CN.md`](docs/INSTALL.zh-CN.md) / [`docs/INSTALL.md`](docs/INSTALL.md) | **安装手册**：前置条件、部署步骤、配置项、故障排查 |
+| [`docs/USAGE.zh-CN.md`](docs/USAGE.zh-CN.md) / [`docs/USAGE.md`](docs/USAGE.md) | **使用手册**：13 个工具的逐个说明、典型工作流、常见误区 |
+| [`docs/mcp_etl_plan.md`](docs/mcp_etl_plan.md) | **开发记录**：需求背景、架构决策（ADR）、spring 侧契约、卡死检测设计、分阶段任务与变更记录 |

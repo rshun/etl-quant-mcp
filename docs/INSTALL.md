@@ -481,6 +481,6 @@ writer.
 
 ## 14. Getting more detail
 
-`README.md` covers the design. `docs/mcp_etl_plan.md` is the full development
+`../README.md` covers the design. `mcp_etl_plan.md` is the full development
 record: requirements, architecture decisions, the contract with `spring`, and
 the reasoning behind the hang-detection design.
