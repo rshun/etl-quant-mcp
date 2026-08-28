@@ -9,3 +9,5 @@ settings*.json
 tmp/
 log/
 .venv/
+# install.sh 生成的 systemd unit：内容因机器而异，不入库
+deploy/*.generated

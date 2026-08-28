@@ -28,6 +28,10 @@ ETL 调度 MCP 服务（服务名 `quant-etl`）。把 [spring](https://github.c
 
 ## 安装
 
+> 部署到服务器请用 **[`INSTALL.zh-CN.md`](INSTALL.zh-CN.md)**（中文）或 **[`INSTALL.md`](INSTALL.md)**（English）+ `./install.sh`：
+> 它会校验前置条件、建 venv、验证跨仓调用、并按你的路径和端口生成 systemd unit。
+> 下面是手工安装的说明。
+
 依赖只有 `mcp` —— 重活都在 spring 的解释器里跑，本仓库不需要 duckdb / pandas / akshare。
 
 需要 Python **3.10+**（用到 PEP 604 的 `X | Y` 注解）。实测通过的版本：
