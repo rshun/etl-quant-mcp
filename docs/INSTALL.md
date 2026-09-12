@@ -27,7 +27,7 @@ AI assistant as a set of tools, so the assistant can:
 - re-download exactly the missing pieces,
 - watch a running job and stop it if it stalls.
 
-It never runs arbitrary commands or arbitrary SQL. It can only start the six ETL
+It never runs arbitrary commands or arbitrary SQL. It can only start the seven ETL
 programs that are named in its allow-list.
 
 ---
@@ -400,7 +400,7 @@ The protections that do exist:
 
 - It binds to `127.0.0.1` by default, so only processes on the same machine can
   reach it.
-- It can only start the six ETL programs in its allow-list. There is no tool for
+- It can only start the seven ETL programs in its allow-list. There is no tool for
   running arbitrary commands or arbitrary SQL.
 - Every parameter is validated before a subprocess is started: dates must be
   real calendar dates, stock codes must match a strict pattern, and enumerated

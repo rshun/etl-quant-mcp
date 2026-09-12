@@ -119,10 +119,11 @@ naming the parameter and the reason.
 |---|---|
 | `etl_import_daily` | `lday` / `bstock` / `tdx` (default `bstock`) |
 | `etl_fetch_index` | `lday` / `bstock` (default `bstock`) |
-| `etl_adjust` | `bstock` only |
+| `etl_adjust` | `local` / `bstock` (default `local`; `bstock` is deprecated) |
 
 > `lday` and `tdx` require a Windows TDX installation directory. **On a Linux
-> server only `bstock` is usable.**
+> server only `bstock` is usable.** `etl_adjust`'s `local` source does no network
+> I/O at all — it computes locally — so that restriction does not apply to it.
 
 ---
 
@@ -174,14 +175,30 @@ downloads but does not write a single byte to the database. Use it first.
 
 ### `etl_adjust`
 
-Download adjustment factors and expand them to every trading day.
+Compute adjustment factors and expand them to every trading day.
 
-**Parameters:** as above, except `source` can only be `bstock` and there is no
-`print_only`.
+**Parameters:** as above, minus `print_only`, plus two of its own:
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `source` | string | `local` | `local` computes locally from `CAPITAL_DETAIL` events plus `STOCK_DAILY` closes; `bstock` is **deprecated** — it only records raw events into `ADJ_FACTOR_RAW` and no longer maintains the dense table |
+| `densify` | string | `auto` | Whether to write the per-day `ADJ_FACTOR` table: `auto` (on for `local`, off for `bstock`) / `on` / `off` |
 
 **Note:** **run it even when no adjustment events occurred in the range.** It is
 also responsible for forward-filling the `ADJ_FACTOR` table up to `end`. "No
 dividends this week, skip it" is the wrong instinct.
+
+**Prerequisites (since 2026-09-10):** now that the default source computes
+locally rather than downloading, `etl_import_daily` must have run first, and
+`CAPITAL_DETAIL` must hold data. That table is maintained by spring's
+`sync_capital`, which **is not exposed by this service** — if it is behind, you
+have to top it up on the spring side by hand.
+
+**Do not blindly re-run a failure:** it pre-checks `ADJ_FACTOR` for gaps (a
+skipped run, no densification since the listing date, a hole inside the range)
+and exits with code 1, writing the exact `-b` backfill command into the log.
+Read that command out with `get_job_output`, backfill the range it names, then
+run the range you originally wanted.
 
 ---
 
@@ -197,7 +214,7 @@ the SSE Composite.
 
 ### `etl_fill_indicators`
 
-Fill three families of derived indicators.
+Fill four families of derived indicators.
 
 **Parameters**
 
@@ -205,16 +222,20 @@ Fill three families of derived indicators.
 |---|---|---|---|
 | `begin` / `end` / `codes` / `exchanges` | | | As above |
 | `forcerun` | bool | `false` | Run even on a non-trading day |
-| `targets` | array | all three | Subset selection, see below |
+| `overwrite` | bool | `false` | **Applies to `fill_turnover` only**: by default it fills only rows whose turnover is empty; switch this on to recompute over existing values |
+| `targets` | array | all four | Subset selection, see below |
 
-`targets` may contain `fill_volratio`, `update_limit`, and `fill_shares`.
-**Whatever order you pass, execution is always
-`fill_volratio → update_limit → fill_shares`** — the order is fixed so
-dependencies cannot be inverted.
+`targets` may contain `fill_volratio`, `update_limit`, `fill_shares`, and
+`fill_turnover`. **Whatever order you pass, execution is always
+`fill_volratio → update_limit → fill_shares → fill_turnover`** — the order is
+fixed so dependencies cannot be inverted.
 
-**Prerequisite:** all three depend on that day's quotes, so
+**Prerequisite:** all four depend on that day's quotes, so
 **`etl_import_daily` must run first**. `fill_shares` additionally needs data in
-the `CAPITAL_DETAIL` table, or newly listed stocks are skipped.
+the `CAPITAL_DETAIL` table, or newly listed stocks are skipped. `fill_turnover`
+divides daily volume by `DAILY_BASIC.float_shares`, and that float share count is
+exactly what `fill_shares` backfills — which is why it runs last. Invert the
+order and you compute a column of nulls.
 
 **Different result shape:** it creates one job per target, so it returns
 `{"targets": [...], "jobs": [...]}` rather than a single `job_id`.
@@ -393,7 +414,7 @@ says so explicitly.
 
 Returns the **current, real** command-line definition of one ETL program.
 `name` is required and must be one of `adjust`, `import_daily`, `fetch_index`,
-`fill_volratio`, `update_limit`, `fill_shares`.
+`fill_volratio`, `update_limit`, `fill_shares`, `fill_turnover`.
 
 The result comes straight from spring's own argument parser, so it **can never go
 stale**, and `help` text is passed through verbatim.
@@ -402,7 +423,7 @@ stale**, and `help` text is passed through verbatim.
 
 1. For `import_daily`, `adjust`, and `fetch_index`, the `begin`/`end` defaults are
    **the day you asked**, so they change daily.
-2. For the three `fill_*` programs, `begin`/`end` default to `null` at the parser
+2. For the four `fill_*` programs, `begin`/`end` default to `null` at the parser
    level; the real defaults (T-1 / today) are applied after parsing, so they are
    **only discoverable from the `help` text**.
 
@@ -455,7 +476,7 @@ A dry run: the full download path, nothing written, back in a couple of seconds.
 
 ### Things it cannot do, by design
 
-- **No arbitrary command execution** — only the six allow-listed ETL programs
+- **No arbitrary command execution** — only the seven allow-listed ETL programs
 - **No arbitrary SQL** — there is no query tool (use `quant-mcp` for read-only queries)
 - **No dropping or truncating tables**
 
@@ -485,6 +506,7 @@ cost of a mistake considerably lower than it first appears.
 | `stalled` means the job failed | No. It is an **alarm**; the process is alive and may recover. |
 | Exit code 2 means partial success | No. 2 is a **command-line usage error**, which is a failure. |
 | Skip `etl_adjust` when there were no dividends | Run it. It also forward-fills `ADJ_FACTOR` up to `end`. |
+| `etl_adjust` downloads factors from the internet | Not any more. Since 2026-09-10 the default source is `local`, computed on the spot; `bstock` is deprecated. |
 | Submitting several jobs makes them finish sooner | No. One writer only; everything queues. |
 | Use `check_data_gaps`'s exit code | Don't. Use the `status` field in the result. |
 | `summarize_etl_log` shows jobs this service ran | It does not. It reads the ETL's own log files. Use `list_jobs` for this service's jobs. |

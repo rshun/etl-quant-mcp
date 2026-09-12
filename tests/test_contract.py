@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：以固化快照断言「我按契约调用 spring」
+#   2026-09-12  Claude  跟进 spring：快照补 fill_turnover，adjust 参数面更新
 """跨仓契约测试——本仓库这一半。
 
 文档第七节把契约测试拆成两份，两边都不需要对方在场：
@@ -33,15 +34,16 @@ from tests.conftest import (
 SNAPSHOT = load_snapshot()
 PROGRAM_IDS = sorted(SNAPSHOT)
 
-# 6 个程序共有的参数面
+# 7 个程序共有的参数面
 COMMON_FLAGS = {"begin": "-b", "end": "-e", "codes": "-c", "exchanges": "-x"}
 ARGUMENT_KEYS = {"flags", "type", "action", "nargs", "default",
                  "choices", "required", "help"}
 
 # 自省当天作为默认值的三个下载型程序
 DATE_DEFAULT_PROGRAMS = ("adjust", "fetch_index", "import_daily")
-# begin/end 在 argparse 层默认为 null 的三个补齐型程序
-NULL_DEFAULT_PROGRAMS = ("fill_volratio", "update_limit", "fill_shares")
+# begin/end 在 argparse 层默认为 null 的四个补齐型程序
+NULL_DEFAULT_PROGRAMS = ("fill_volratio", "update_limit", "fill_shares",
+                        "fill_turnover")
 
 
 # ── 快照本身 ──────────────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@ def test_common_flags_present(name):
 
 @pytest.mark.parametrize("name", PROGRAM_IDS)
 def test_exchange_choices_consistent(name):
-    """正例: 交易所枚举在 6 个程序间一致，本服务才敢用同一份白名单校验"""
+    """正例: 交易所枚举在 7 个程序间一致，本服务才敢用同一份白名单校验"""
     action = SNAPSHOT[name]["arguments"]["exchanges"]
     assert action["choices"] == ["sh", "sz", "bj", "all"]
     assert action["type"] == "str.lower", "本服务依赖它做大小写归一化"
@@ -118,7 +120,7 @@ def test_download_programs_default_to_today(name):
 
 @pytest.mark.parametrize("name", NULL_DEFAULT_PROGRAMS)
 def test_fill_programs_have_null_argparse_default(name):
-    """正例(陷阱2): 三个补齐型的 begin/end 在 argparse 层默认为 null。
+    """正例(陷阱2): 四个补齐型的 begin/end 在 argparse 层默认为 null。
 
     真实默认（T-1／今天）是 parse_arguments() 里 parse 之后才套用的，自省看不到。
     该语义只由 help 文本承载，所以本服务必须把 help 原样透传给模型。
@@ -148,7 +150,7 @@ def test_argv_prefix_always_unbuffered(name):
 
 @pytest.mark.parametrize("name", PROGRAM_IDS)
 def test_argv_common_params(name):
-    """正例: 通用参数在 6 个程序上构造结果一致"""
+    """正例: 通用参数在 7 个程序上构造结果一致"""
     argv = _argv(name, begin="20260817", end="20260818",
                  codes=["600519"], exchanges=["SH"])
     assert argv[4:] == ["-b", "20260817", "-e", "20260818",
@@ -168,6 +170,23 @@ def test_argv_forcerun_flag(name):
     assert _argv(name, forcerun=True)[4:] == ["-f"]
 
 
+def test_argv_fill_turnover_overwrite():
+    """正例: 换手率的 -o 覆盖开关——默认只补空行，开了才重算"""
+    assert _argv("fill_turnover", overwrite=True)[4:] == ["-o"]
+
+
+@pytest.mark.parametrize("name", [t for t in NULL_DEFAULT_PROGRAMS
+                                  if t != schema.FILL_OVERWRITE_TARGET])
+def test_argv_overwrite_rejected_by_other_fill_programs(name):
+    """反例(关键): 只有 fill_turnover 有 -o。
+
+    合并 Tool 把 overwrite 透传给别的 target 时必须在这里被拦下，
+    否则会拼出一个 argparse 不认的选项、以退出码 2 失败。
+    """
+    with pytest.raises(params.ParamError, match="不接受参数"):
+        _argv(name, overwrite=True)
+
+
 def test_argv_import_daily_print_only():
     """正例: 干跑开关是安全冒烟的依据"""
     assert _argv("import_daily", print_only=True)[4:] == ["-p"]
@@ -175,7 +194,7 @@ def test_argv_import_daily_print_only():
 
 @pytest.mark.parametrize("name", PROGRAM_IDS)
 def test_argv_rejects_injection(name):
-    """反例(安全): 6 个程序一视同仁地拒绝夹带"""
+    """反例(安全): 7 个程序一视同仁地拒绝夹带"""
     with pytest.raises(params.ParamError, match="代码非法"):
         _argv(name, begin="20260817", codes=["600519; DROP TABLE"])
 
@@ -217,13 +236,18 @@ def test_partial_status_not_produced_by_spring_yet():
 # ── 其他注册表不变式 ──────────────────────────────────────────────────────────
 
 def test_fill_targets_are_registered_programs():
-    """正例: 合并 Tool 的三个 target 都必须在白名单内"""
+    """正例: 合并 Tool 的四个 target 都必须在白名单内"""
     assert set(schema.FILL_TARGETS) <= set(schema.PROGRAMS)
 
 
 def test_fill_targets_order_is_dependency_safe():
-    """正例: 三者顺序固定，避免依赖颠倒"""
-    assert schema.FILL_TARGETS == ("fill_volratio", "update_limit", "fill_shares")
+    """正例: 四者顺序固定，避免依赖颠倒。
+
+    fill_turnover 由日线成交量 / DAILY_BASIC.float_shares 算出，而流通股本由
+    fill_shares 回填，因此它必须排在最后——顺序颠倒会算出一片空值。
+    """
+    assert schema.FILL_TARGETS == ("fill_volratio", "update_limit",
+                                   "fill_shares", "fill_turnover")
 
 
 def test_check_module_not_in_write_whitelist():

@@ -2,6 +2,8 @@
 #   2026-08-19  Claude  新建：程序注册表、退出码契约、状态机枚举与环境变量出口，
 #                       作为本服务与 spring 之间跨仓契约的单一出处
 #   2026-08-19  Claude  新增分片枚举、可重试状态集与 check_daily 的 JSON 契约
+#   2026-09-12  Claude  跟进 spring：注册 fill_turnover(spring 于 2026-09-10 纳入契约)，
+#                       并入 FILL_TARGETS 末位
 """与 spring 的跨仓契约(single source of truth)。
 
 本服务对 ETL 的内部逻辑「零知识」(ADR-5)，只需要三件事：
@@ -28,11 +30,20 @@ PROGRAMS: dict[str, str] = {
     "fill_volratio": "etl.fill_volratio",
     "update_limit":  "etl.update_limit",
     "fill_shares":   "etl.fill_shares",
+    "fill_turnover": "etl.fill_turnover",
 }
 
-# 三个补齐类程序参数完全一致、日常一起补，Tool 层合并为 etl_fill_indicators，
-# 按此顺序串行执行(见文档 6.1)。
-FILL_TARGETS: tuple[str, ...] = ("fill_volratio", "update_limit", "fill_shares")
+# 四个补齐类程序日常一起补，Tool 层合并为 etl_fill_indicators，按此顺序串行执行
+# (见文档 6.1)。顺序不是随意排的：fill_turnover 由 STOCK_DAILY.volume 除以
+# DAILY_BASIC.float_shares 算出，而流通股本正是 fill_shares 回填的，
+# 故它必须排在 fill_shares 之后(spring `config/pipeline.yaml` 同样这么声明)。
+FILL_TARGETS: tuple[str, ...] = ("fill_volratio", "update_limit",
+                                 "fill_shares", "fill_turnover")
+
+# 前三个 target 的参数面完全一致，fill_turnover 多一个 -o/--overwrite
+# (默认只补空行，-o 覆盖重算)。合并 Tool 的 overwrite 只对它有意义——
+# 传给其他 target 会被 build_argv 以「不接受该参数」拒绝。
+FILL_OVERWRITE_TARGET = "fill_turnover"
 
 # spring 的自省出口(ADR-4/7)
 DESCRIBE_MODULE = "tools.describe_cli"

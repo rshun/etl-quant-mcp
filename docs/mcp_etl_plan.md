@@ -32,11 +32,12 @@ MCP 服务端 `quant-etl`，让 Claude 完成闭环：**查日志 → 判定卡�
 | 1. 指定日期/区间下载复权因子 | `etl.adjust` |
 | 2. 指定日期/区间下载股票交易明细 | `etl.import_daily` |
 | 3. 指定日期/区间下载指数交易明细 | `etl.fetch_index` |
-| 4. 补齐量比 / 涨跌停 / 股本 | `etl.fill_volratio` / `etl.update_limit` / `etl.fill_shares` |
+| 4. 补齐量比 / 涨跌停 / 股本 / 换手率 | `etl.fill_volratio` / `etl.update_limit` / `etl.fill_shares` / `etl.fill_turnover` |
 | 5. 查看 `log/stockdailyYYYYMMDD.log` | 新增日志工具 |
 | **6. 卡死检测与中断续跑**（澄清后新增，实际最高优先级） | 心跳监控 + 分片 + 缺口检测 |
 
-**明确不做**：任意 SQL 写入、任意命令执行、删表/清库类工具。写入面收敛到上述 6 个既有 ETL 程序。
+**明确不做**：任意 SQL 写入、任意命令执行、删表/清库类工具。写入面收敛到上述 7 个既有 ETL 程序
+（`fill_turnover` 于 2026-09-12 补入，spring 早在 2026-09-10 已把它纳入契约）。
 
 ---
 
@@ -200,7 +201,7 @@ MCP 侧调用它拿参数 schema，**参数增删改自动跟随，MCP 零改动
 **两个默认值陷阱，MCP 侧必须处理**：
 
 1. `adjust` / `import_daily` / `fetch_index` 的 `-b`/`-e` 默认值是 **`build_parser()` 调用当天**，因此自省输出**逐日变化**。M5 的契约快照测试必须先把日期类默认值归一化，否则测试每天都会红。
-2. `fill_volratio` / `update_limit` / `fill_shares` 的 `-b`/`-e` 在 argparse 层默认值是 `null`，**真实默认（T-1／今天）是 `parse_arguments()` 里 parse 之后才套用的**，自省看不到。该语义由 `help` 文本承载（契约 C4），MCP 必须把 `help` 原样透传给模型。
+2. `fill_volratio` / `update_limit` / `fill_shares` / `fill_turnover` 的 `-b`/`-e` 在 argparse 层默认值是 `null`，**真实默认（T-1／今天）是 `parse_arguments()` 里 parse 之后才套用的**，自省看不到。该语义由 `help` 文本承载（契约 C4），MCP 必须把 `help` 原样透传给模型。
 
 ### ADR-5：MCP 对 ETL 内部逻辑「零知识」
 
@@ -283,7 +284,7 @@ if __name__ == "__main__":
 
 > **为什么改**：argparse 遇到非法参数会 `sys.exit(2)`，这是 Python 标准库写死的行为。实测 `python -m etl.import_daily -s nosuch` → `exit=2`。若沿用原约定，MCP 会把「参数传错了」读成「部分成功」——一个**静默的错误结论**，正是 S1 要消灭的那类问题。由于 `2 = 部分成功` 当时尚未被任何程序产出，改起来零成本。
 >
-> **实现现状**：6 个程序已全部返回 `0`/`1`，`2` 由 argparse 自动产出。**`3` 尚未有任何程序产出**——`fetch_batch_data` 不回报每只股票的成败，做不出可信判定。MCP 侧应把 `3` 当作「协议已预留、暂不出现」处理。
+> **实现现状**：7 个程序已全部返回 `0`/`1`（`fill_turnover` 于 2026-09-10 由 spring 补入契约），`2` 由 argparse 自动产出。**`3` 尚未有任何程序产出**——`fetch_batch_data` 不回报每只股票的成败，做不出可信判定。MCP 侧应把 `3` 当作「协议已预留、暂不出现」处理。
 
 立此契约后，ETL 内部新增任何逻辑分支，只要遵守「失败返回非 0」，MCP 自动判对成败。
 
@@ -310,16 +311,21 @@ if processed % 100 == 0 or now - last_progress_at >= 30:
 
 ### C3 依赖顺序声明在 spring 侧
 
-新增 `etl/pipeline.yaml`，改 ETL 的人顺手维护，MCP 读它做拓扑排序：
+新增 `config/pipeline.yaml`（初版落在 `etl/pipeline.yaml`，spring 于 2026-09-10 前后移入 `config/`），
+改 ETL 的人顺手维护，MCP 读它做拓扑排序：
 
 ```yaml
 import_daily:  {requires: []}
 fetch_index:   {requires: []}
-adjust:        {requires: []}
+adjust:        {requires: [import_daily, sync_capital]}
 fill_volratio: {requires: [import_daily]}
 update_limit:  {requires: [import_daily]}
 fill_shares:   {requires: [import_daily, sync_capital]}
+fill_turnover: {requires: [import_daily, fill_shares]}
 ```
+
+> `adjust` 的 `requires` 于 2026-09-10 由空变为 `[import_daily, sync_capital]`：默认源改为 `local`
+> 之后，复权因子由 `CAPITAL_DETAIL` 除权事件 + `STOCK_DAILY` 收盘价本地自算，不再是纯下载。
 
 ### C4 新逻辑的语义写进 argparse `help=`
 
@@ -405,12 +411,16 @@ for line in proc.stdout:                 # 行迭代，配合 -u 实现行级实
 
 | Tool | 底层 | ETL 参数 |
 |------|------|---------|
-| `etl_adjust` | `etl.adjust` | begin, end, codes, exchanges(sh/sz/bj/all), source(bstock) |
+| `etl_adjust` | `etl.adjust` | begin, end, codes, exchanges(sh/sz/bj/all), source(local/bstock), densify(auto/on/off) |
 | `etl_import_daily` | `etl.import_daily` | + source(lday/bstock/tdx), print_only |
 | `etl_fetch_index` | `etl.fetch_index` | + source(lday/bstock) |
-| `etl_fill_indicators` | fill_volratio / update_limit / fill_shares | begin, end, codes, exchanges, forcerun, **targets**（多选，按序串行） |
+| `etl_fill_indicators` | fill_volratio / update_limit / fill_shares / fill_turnover | begin, end, codes, exchanges, forcerun, overwrite(仅 fill_turnover), **targets**（多选，按序串行） |
 
-需求 4 的三项合并为一个工具：参数完全一致（`-b -e -c -x -f`），日常一起补，拆开只会让模型多轮调用。可选再挂 `turnover`（`fill_turnover`，多一个 `-o/--overwrite`）。
+需求 4 的四项合并为一个工具：日常一起补，拆开只会让模型多轮调用。前三项参数完全一致（`-b -e -c -x -f`）；
+`fill_turnover` 于 2026-09-12 补入（当初列为「可选再挂」），它多一个 `-o/--overwrite`，
+合并 Tool 的 `overwrite` 只透传给它——带给别的 target 会被 `build_argv` 拒绝。
+执行顺序 `fill_volratio → update_limit → fill_shares → fill_turnover`：换手率由日线成交量除以
+`DAILY_BASIC.float_shares` 算出，而流通股本正是 `fill_shares` 回填的，颠倒顺序会算出一片空值。
 
 **MCP 层附加参数**（非 ETL 参数）：
 
@@ -458,7 +468,7 @@ for line in proc.stdout:                 # 行迭代，配合 -u 实现行级实
 
 | 放哪 | 测什么 | 举例 |
 |---|---|---|
-| spring `tests/unit/test_cli_contract.py` | 「我的 CLI 接口是稳定的」 | 6 个程序都有 `-b -e -c -x`；失败退出码为 1；`describe_cli` 输出结构合法 |
+| spring `tests/unit/test_cli_contract.py` | 「我的 CLI 接口是稳定的」 | 7 个程序都有 `-b -e -c -x`；失败退出码为 1；`describe_cli` 输出结构合法 |
 | etl-quant-mcp `tests/test_contract.py` | 「我按契约调用」 | 用固化的 JSON 快照做 fixture，测 argv 构造与退出码解读 |
 
 spring 改 CLI → spring 测试红；MCP 用错参数 → MCP 测试红。只有端到端时才需凑齐（标 `integration`，靠 `SPRING_DIR` 环境变量）。
@@ -472,7 +482,7 @@ spring 改 CLI → spring 测试红；MCP 用错参数 → MCP 测试红。只�
 ```text
 spring/
 ├── tools/describe_cli.py         # 新增：argparse → JSON 自省出口
-├── etl/pipeline.yaml             # 新增：程序依赖声明（C3）
+├── config/pipeline.yaml          # 新增：程序依赖声明（C3，原 etl/pipeline.yaml）
 └── tests/unit/test_cli_contract.py   # 新增：CLI 契约自测
 ```
 
@@ -990,10 +1000,25 @@ fetchData()
 已按同目录约定改为 `etl.tools.check_daily`。这直接影响 MCP 的「查日志 → 判定」闭环：
 改之前 `summarize_etl_log` 根本看不见完整性检查的结论。
 
-### 15.4 三个 `fill_*` 的调度方式未知
+### 15.4 四个 `fill_*` 的调度方式未知
 
-夜跑脚本里没有 `fill_volratio` / `update_limit` / `fill_shares`。
+夜跑脚本里没有 `fill_volratio` / `update_limit` / `fill_shares` / `fill_turnover`。
 它们是在同一脚本的其他函数、另一条 crontab，还是根本不自动跑？这影响 `pipeline.yaml` 依赖声明的准确性。
+
+### 15.5 `adjust` 的数据前置 `sync_capital` 不在 MCP 范围内【2026-09-12 新增】
+
+spring 于 2026-09-10 把 `adjust` 的默认源改为 `local`——复权因子由 `CAPITAL_DETAIL` 的除权事件
+加 `STOCK_DAILY` 收盘价本地自算，`requires` 随之变为 `[import_daily, sync_capital]`。
+
+而 `sync_capital` 因为**没有日期参数**，当初被判定为「暂不纳入 MCP」（见第九节风险表）。
+后果是：`CAPITAL_DETAIL` 落后时 `etl_adjust` 会失败或漏算，**而模型没有任何 Tool 能自己补上**，
+只能提示人工去 spring 侧跑一次。
+
+同一时间 `adjust` 还加了运行前预检：`ADJ_FACTOR` 有漏跑 / 上市日起未稠密化 / 区间内部空洞时，
+以退出码 1 退出并在日志里给出该用哪个 `-b` 回填。这条已写进 `etl_adjust` 的 Tool 说明，
+模型应先用 `get_job_output` 读出那条命令，而不是盲目重跑。
+
+待定：是否给 `sync_capital` 开一个无日期参数的 Tool，或在 `etl_adjust` 失败时自动附带提示。
 
 ---
 
@@ -1028,3 +1053,4 @@ fetchData()
 | 2026-08-21 | Claude | **修复生产起不来**：`Runner.list` 遮蔽内置 `list`，Python < 3.14 上同类注解 `-> list[dict]` 解析到该方法而抛 `TypeError`；改名 `list_jobs` 并新增 AST 静态守卫（此类缺陷在 3.14 上跑测试无法发现） |
 | 2026-08-21 | Claude | **修复终止竞态**：`_monitor` 在发起终止前即写终态，SIGTERM→宽限期→SIGKILL 期间对外呈现「已结束」，与待重试状态冲突；改为只记录终止意图，终态由 `_run` 原子块统一落定 |
 | 2026-08-22 | Claude | **M6 部署上线**：systemd 常驻（streamable-http，127.0.0.1:8787，以管道属主运行），用户确认部署成功；头部状态改为「已交付并部署上线」；清理 S3 小节两行遗留未勾选重复项 |
+| 2026-09-12 | Claude | **跟进 spring 变更**：`fill_turnover` 并入 `etl_fill_indicators`（新增只对它生效的 `overwrite`）；`etl_adjust` 暴露 `densify` 并改写说明（默认源 `bstock`→`local`、`bstock` 已废弃、新增运行前预检）；重新生成契约快照；`pipeline.yaml` 路径更正为 `config/`；新增 15.5。296 passed，跨仓漂移守卫 9 passed |

@@ -108,9 +108,10 @@ queued → running → ┬→ succeeded       成功
 |---|---|
 | `etl_import_daily` | `lday` / `bstock` / `tdx`（默认 `bstock`） |
 | `etl_fetch_index` | `lday` / `bstock`（默认 `bstock`） |
-| `etl_adjust` | 仅 `bstock` |
+| `etl_adjust` | `local` / `bstock`（默认 `local`；`bstock` 已废弃） |
 
 > `lday` 和 `tdx` 依赖 Windows 上的通达信目录，**Linux 服务器上只有 `bstock` 可用**。
+> `etl_adjust` 的 `local` 不走网络，是本地自算，不受这条限制。
 
 ---
 
@@ -160,14 +161,27 @@ queued → running → ┬→ succeeded       成功
 
 ### `etl_adjust`
 
-下载复权因子，并稠密化到逐个交易日。
+计算复权因子，并稠密化到逐个交易日。
 
-**参数**：同上，但 `source` 只能是 `bstock`，且没有 `print_only`。
+**参数**：同上，但没有 `print_only`，另有两个自己的参数：
+
+| 名称 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `source` | string | `local` | `local`=由 `CAPITAL_DETAIL` 除权事件 + `STOCK_DAILY` 收盘价本地自算；`bstock`=**已废弃**，只留痕写 `ADJ_FACTOR_RAW`、不再维护稠密表 |
+| `densify` | string | `auto` | 是否写 `ADJ_FACTOR` 逐日表：`auto`（`local` 开 / `bstock` 关）/ `on` / `off` |
 
 **什么时候用**：补复权因子。
 
 **注意**：**即使区间内没有新的复权事件也应该执行**——它同时负责把 `ADJ_FACTOR`
 表向前填充到 `end` 日期。所以"这几天没有除权除息，跳过吧"是错的。
+
+**前置条件**（2026-09-10 起）：默认源改为本地自算之后，它不再是纯下载，
+需要 `etl_import_daily` 先跑完，且 `CAPITAL_DETAIL` 表要有数据——
+后者由 spring 的 `sync_capital` 维护，**没有纳入本服务**，落后时只能去 spring 侧手工补。
+
+**失败了别急着重跑**：它会在运行前预检 `ADJ_FACTOR` 缺口（漏跑、上市日起未稠密化、
+区间内部空洞），发现缺口就以退出码 1 退出，并在日志里写明该用哪个 `-b` 回填。
+先用 `get_job_output` 把那条命令读出来，按它给的区间补完，再跑你本来要跑的区间。
 
 ---
 
@@ -182,7 +196,7 @@ queued → running → ┬→ succeeded       成功
 
 ### `etl_fill_indicators`
 
-补齐量比 / 涨跌停 / 股本三类衍生指标。
+补齐量比 / 涨跌停 / 股本 / 换手率四类衍生指标。
 
 **参数**
 
@@ -190,14 +204,18 @@ queued → running → ┬→ succeeded       成功
 |---|---|---|---|
 | `begin` / `end` / `codes` / `exchanges` | | | 同上 |
 | `forcerun` | bool | `false` | 非交易日也强制执行 |
+| `overwrite` | bool | `false` | **只作用于 `fill_turnover`**：默认只补换手率为空的行，开了才覆盖重算 |
 | `targets` | array | 全做 | 子集选择，见下 |
 
-`targets` 可选：`fill_volratio`（量比）、`update_limit`（涨跌停）、`fill_shares`（股本）。
-**无论你传什么顺序，都会按 `fill_volratio → update_limit → fill_shares` 执行**——
-顺序是固定的，避免依赖颠倒。
+`targets` 可选：`fill_volratio`（量比）、`update_limit`（涨跌停）、`fill_shares`（股本）、
+`fill_turnover`（换手率）。
+**无论你传什么顺序，都会按 `fill_volratio → update_limit → fill_shares → fill_turnover`
+执行**——顺序是固定的，避免依赖颠倒。
 
-**前置条件**：三项都依赖当日日线，**必须先跑 `etl_import_daily`**。
-`fill_shares` 还额外依赖 `CAPITAL_DETAIL` 表有数据，否则新股会被跳过。
+**前置条件**：四项都依赖当日日线，**必须先跑 `etl_import_daily`**。
+`fill_shares` 还额外依赖 `CAPITAL_DETAIL` 表有数据，否则新股会被跳过；
+`fill_turnover` 由日线成交量除以 `DAILY_BASIC.float_shares` 算出，流通股本正是
+`fill_shares` 回填的，所以它必须排在最后——顺序颠倒会算出一片空值。
 
 **返回值形状不同**：它为每个 target 建一个独立任务，所以返回的是
 `{"targets": [...], "jobs": [...]}` 而不是单个 `job_id`。
@@ -362,15 +380,16 @@ queued → running → ┬→ succeeded       成功
 
 ### `describe_etl_program`
 
-返回某个 ETL 程序**当前真实的**命令行参数定义。`name` 必填，取值是六个程序名之一：
-`adjust` / `import_daily` / `fetch_index` / `fill_volratio` / `update_limit` / `fill_shares`。
+返回某个 ETL 程序**当前真实的**命令行参数定义。`name` 必填，取值是七个程序名之一：
+`adjust` / `import_daily` / `fetch_index` / `fill_volratio` / `update_limit` / `fill_shares` /
+`fill_turnover`。
 
 结果直接来自 spring 的 argparse，**永不过期**；`help` 文本原样透传。
 
 **两个默认值陷阱**：
 
 1. `import_daily` / `adjust` / `fetch_index` 的 `begin`/`end` 默认值是**自省当天**，逐日变化；
-2. 三个 `fill_*` 的 `begin`/`end` 在 argparse 层默认为 `null`，真实默认（T-1／今天）
+2. 四个 `fill_*` 的 `begin`/`end` 在 argparse 层默认为 `null`，真实默认（T-1／今天）
    是解析之后才套用的，**只能从 `help` 文本读出来**。
 
 ---
@@ -420,7 +439,7 @@ etl_import_daily(begin=<某个交易日>, codes=["600519"], print_only=true)
 
 ### 做不到的事（设计如此）
 
-- **不能执行任意命令**，只能启动白名单里的 6 个 ETL 程序
+- **不能执行任意命令**，只能启动白名单里的 7 个 ETL 程序
 - **不能执行任意 SQL**，没有查询工具（只读查询请用 `quant-mcp`）
 - **不能删表清库**
 
@@ -445,6 +464,7 @@ ETL 的入库是**幂等 upsert**，重跑不会损坏数据。所以最坏情�
 | `stalled` 表示任务失败了 | 不是。它是**报警**，进程还活着，可能自己恢复 |
 | 退出码 2 表示部分成功 | 不是。2 是**命令行用法错误**，属于失败 |
 | 区间内没有除权就不用跑 `etl_adjust` | 要跑。它还负责把 `ADJ_FACTOR` 向前填充到 `end` |
+| `etl_adjust` 是去网上下复权因子 | 不是了。默认源自 2026-09-10 起改为 `local` 本地自算，`bstock` 已废弃 |
 | 提交多个任务会并发加快 | 不会。DuckDB 单写者，一律排队串行 |
 | 可以用 `check_data_gaps` 的退出码判断 | 不要。用返回值里的 `status` 字段 |
 | `summarize_etl_log` 能看到本服务跑的任务 | 看不到，它读的是 ETL 自己的日志文件。本服务的任务用 `list_jobs` |

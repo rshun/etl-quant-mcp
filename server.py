@@ -3,12 +3,14 @@
 #   2026-08-19  Claude  新增日志类 Tool：list_etl_logs / read_etl_log / summarize_etl_log
 #   2026-08-19  Claude  新增分片执行、失败重试与 check_data_gaps
 #   2026-08-19  Claude  支持 streamable-http 传输，使客户端与服务端可分属不同用户
+#   2026-09-12  Claude  跟进 spring：fill_turnover 并入 etl_fill_indicators(新增 overwrite)，
+#                       etl_adjust 暴露 densify 并改写说明(默认源改 local、新增运行前预检)
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
 **查日志 → 判定卡死/缺口 → 定向补数 → 复核**。
 
-写入面收敛在 schema.PROGRAMS 白名单内的 6 个既有 ETL 程序，
+写入面收敛在 schema.PROGRAMS 白名单内的 7 个既有 ETL 程序，
 不提供任意 SQL 写入、任意命令执行、删表清库类工具。
 
 关于「动态注册」的取舍：文档 M2 原写「由 PROGRAMS 动态注册」，实做改为
@@ -374,16 +376,27 @@ def etl_adjust(
     codes: list[str] | None = None,
     exchanges: list[str] | None = None,
     source: str | None = None,
+    densify: str | None = None,
     chunk: str = schema.CHUNK_NONE,
     retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
     stall_timeout: int | None = None,
     max_runtime: int | None = None,
 ) -> dict:
-    """下载复权因子并稠密化到逐交易日（etl.adjust）。
+    """计算复权因子并稠密化到逐交易日（etl.adjust）。
 
     即便区间内没有新的复权事件也应执行——它同时负责把 ADJ_FACTOR 向前填充到 end。
-    
+
+    source 默认 `local`：由 CAPITAL_DETAIL 的除权事件 + STOCK_DAILY 收盘价本地自算，
+    因此**须先跑 etl_import_daily**，且 CAPITAL_DETAIL 要有数据（由 spring 的
+    sync_capital 维护，未纳入本服务）。`bstock` 源已废弃，只留痕写 ADJ_FACTOR_RAW、
+    不再维护稠密表，除非你明确要留痕否则不要选它。
+    densify 控制是否写 ADJ_FACTOR 逐日表：auto（默认，local 开 / bstock 关）/ on / off。
+
+    **失败别急着重跑**：它会在运行前预检 ADJ_FACTOR 缺口（漏跑、上市日起未稠密化、
+    区间内部空洞），有缺口即以退出码 1 退出，并在日志里给出该用哪个 -b 回填——
+    用 get_job_output 把那条命令读出来，按它给的区间先补，再跑本次区间。
+
     chunk 可设 month / year 按自然月或年分片：每段一个任务串行执行，
     单段卡死只损失一段，返回结构里的 failed_segments 指出哪几段要补。
     超过 3650 天的区间**必须**分片，否则会被拒绝。
@@ -392,6 +405,7 @@ def etl_adjust(
     return _launch("adjust", {
         "begin": begin, "end": end if end is not None else begin,
         "codes": codes, "exchanges": exchanges, "source": source,
+        "densify": densify,
     }, wait_seconds=wait_seconds, stall_timeout=stall_timeout,
        max_runtime=max_runtime, chunk=chunk, retries=retries)
 
@@ -430,18 +444,22 @@ def etl_fill_indicators(
     codes: list[str] | None = None,
     exchanges: list[str] | None = None,
     forcerun: bool = False,
+    overwrite: bool = False,
     targets: list[str] | None = None,
     retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
     stall_timeout: int | None = None,
     max_runtime: int | None = None,
 ) -> dict:
-    """补齐量比 / 涨跌停 / 股本三类指标（三个程序参数一致，日常一起补）。
+    """补齐量比 / 涨跌停 / 股本 / 换手率四类指标（日常一起补）。
 
-    targets 默认全做，顺序为 fill_volratio → update_limit → fill_shares；
-    只补其中一两项时传子集。**前置条件**：这三项都依赖当日日线，
-    须先跑 etl_import_daily。
+    targets 默认全做，顺序为 fill_volratio → update_limit → fill_shares
+    → fill_turnover；只补其中几项时传子集，顺序会被自动纠正。
+    **前置条件**：四项都依赖当日日线，须先跑 etl_import_daily；
+    fill_turnover 还依赖 fill_shares 回填的流通股本，故排在它之后。
     forcerun=True 可在非交易日强制执行。
+    overwrite=True **只作用于 fill_turnover**：默认它仅补换手率为空的行，
+    开了才覆盖重算；其余三个 target 不接受该参数，传了也不会带上。
 
     每个 target 是一个独立任务，按 targets 顺序串行执行（DuckDB 单写者）。
     """
@@ -458,12 +476,18 @@ def etl_fill_indicators(
     results = []
     budget = wait_seconds
     for target in selected:
-        started = _launch(target, {
+        values = {
             "begin": begin, "end": end if end is not None else begin,
             "codes": codes, "exchanges": exchanges,
             "forcerun": forcerun or None,
-        }, wait_seconds=budget, stall_timeout=stall_timeout,
-           max_runtime=max_runtime, retries=retries)
+        }
+        # -o/--overwrite 只有 fill_turnover 有；给别的 target 带上会被 build_argv
+        # 以「不接受该参数」拒绝，所以这里按 target 判断而不是无脑透传。
+        if target == schema.FILL_OVERWRITE_TARGET:
+            values["overwrite"] = overwrite or None
+        started = _launch(target, values,
+                          wait_seconds=budget, stall_timeout=stall_timeout,
+                          max_runtime=max_runtime, retries=retries)
         results.append(started)
         if not started.get("ok"):
             return {"ok": False, "error": started["error"],

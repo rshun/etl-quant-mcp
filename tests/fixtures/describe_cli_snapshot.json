@@ -71,12 +71,29 @@
         "type": "str",
         "action": "store",
         "nargs": null,
-        "default": "bstock",
+        "default": "local",
         "choices": [
-          "bstock"
+          "bstock",
+          "local"
         ],
         "required": false,
-        "help": "指定数据源类型: bstock数据源, (默认 bstock数据源)"
+        "help": "指定数据源类型: local=本地自算(CAPITAL_DETAIL+STOCK_DAILY, 写ADJ_FACTOR_LOCAL, 默认); bstock=【已废弃】baostock 下载, 仅留痕写 ADJ_FACTOR_RAW, 不再维护稠密表"
+      },
+      "densify": {
+        "flags": [
+          "--densify"
+        ],
+        "type": "str.lower",
+        "action": "store",
+        "nargs": null,
+        "default": "auto",
+        "choices": [
+          "auto",
+          "on",
+          "off"
+        ],
+        "required": false,
+        "help": "是否稠密化写入 ADJ_FACTOR 逐日表: auto=local 源开 / bstock 源关(默认, bstock 只留痕写RAW), on=强制稠密化, off=只写事件表"
       }
     }
   },
@@ -225,6 +242,98 @@
         ],
         "required": false,
         "help": "指定交易所范围: sh (沪), sz (深), bj (北), all (默认全部)"
+      },
+      "forcerun": {
+        "flags": [
+          "-f",
+          "--forcerun"
+        ],
+        "type": null,
+        "action": "store_true",
+        "nargs": 0,
+        "default": false,
+        "choices": null,
+        "required": false,
+        "help": "强制运行, 即使当前日期不是交易日"
+      }
+    }
+  },
+  "fill_turnover": {
+    "program": "fill_turnover",
+    "module": "etl.fill_turnover",
+    "description": "A股换手率回填工具 (支持多代码、指定日期、覆盖开关)",
+    "arguments": {
+      "begin": {
+        "flags": [
+          "-b",
+          "--begin"
+        ],
+        "type": "str",
+        "action": "store",
+        "nargs": null,
+        "default": null,
+        "choices": null,
+        "required": false,
+        "help": "起始日期 (格式: YYYYMMDD)，默认为T-1"
+      },
+      "end": {
+        "flags": [
+          "-e",
+          "--end"
+        ],
+        "type": "str",
+        "action": "store",
+        "nargs": null,
+        "default": null,
+        "choices": null,
+        "required": false,
+        "help": "结束日期 (格式: YYYYMMDD)，默认: 仅传 -b 时为今天，否则为T-1"
+      },
+      "codes": {
+        "flags": [
+          "-c",
+          "--codes"
+        ],
+        "type": null,
+        "action": "store",
+        "nargs": "+",
+        "default": null,
+        "choices": null,
+        "required": false,
+        "help": "指定股票代码列表 (例如: 600519 000001)，不传则默认处理全量"
+      },
+      "exchanges": {
+        "flags": [
+          "-x",
+          "--exchanges"
+        ],
+        "type": "str.lower",
+        "action": "store",
+        "nargs": "+",
+        "default": [
+          "all"
+        ],
+        "choices": [
+          "sh",
+          "sz",
+          "bj",
+          "all"
+        ],
+        "required": false,
+        "help": "指定交易所范围: sh (沪), sz (深), bj (北), all (默认全部)"
+      },
+      "overwrite": {
+        "flags": [
+          "-o",
+          "--overwrite"
+        ],
+        "type": null,
+        "action": "store_true",
+        "nargs": 0,
+        "default": false,
+        "choices": null,
+        "required": false,
+        "help": "覆盖已有换手率 (默认仅补齐为空的行)"
       },
       "forcerun": {
         "flags": [

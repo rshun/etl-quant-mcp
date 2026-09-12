@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：Tool 注册、参数闸门与任务管理的正反例
+#   2026-09-12  Claude  跟进 spring：fill_turnover 并入 etl_fill_indicators
 """server.py 的正反例。
 
 分两类测：
@@ -272,8 +273,8 @@ def test_job_output_tail(live_runner):
 
 # ── fill_indicators ───────────────────────────────────────────────────────────
 
-def test_fill_indicators_defaults_to_all_three(live_runner):
-    """正例: 不传 targets 时三项全做，顺序固定"""
+def test_fill_indicators_defaults_to_all_targets(live_runner):
+    """正例: 不传 targets 时四项全做，顺序固定"""
     with patch.object(params, "build_argv", return_value=_harmless()):
         result = server.etl_fill_indicators(begin="20260817", wait_seconds=15)
     assert result["ok"] is True
@@ -288,6 +289,31 @@ def test_fill_indicators_normalizes_target_order(live_runner):
             begin="20260817", targets=["fill_shares", "fill_volratio"],
             wait_seconds=15)
     assert result["targets"] == ["fill_volratio", "fill_shares"]
+
+
+def test_fill_indicators_overwrite_only_applies_to_turnover(live_runner):
+    """正例(关键): overwrite 只带给 fill_turnover。
+
+    -o/--overwrite 只有 fill_turnover 有。透传给别的 target 会被 build_argv
+    拒绝，整个补数链就断在第一个 target 上——所以这里按 target 判断。
+    """
+    with patch.object(params, "build_argv", return_value=_harmless()) as build:
+        result = server.etl_fill_indicators(
+            begin="20260817", overwrite=True, wait_seconds=15)
+    assert result["ok"] is True
+    passed = {call.args[0]: call.args[1] for call in build.call_args_list}
+    assert passed[schema.FILL_OVERWRITE_TARGET]["overwrite"] is True
+    for target in schema.FILL_TARGETS:
+        if target != schema.FILL_OVERWRITE_TARGET:
+            assert "overwrite" not in passed[target], f"{target} 不该收到 overwrite"
+
+
+def test_fill_indicators_omits_overwrite_when_off(live_runner):
+    """反例: overwrite=False 时连 fill_turnover 也不带该键（默认仅补空行）"""
+    with patch.object(params, "build_argv", return_value=_harmless()) as build:
+        server.etl_fill_indicators(begin="20260817", wait_seconds=15)
+    passed = {call.args[0]: call.args[1] for call in build.call_args_list}
+    assert "overwrite" not in passed[schema.FILL_OVERWRITE_TARGET]
 
 
 def test_fill_indicators_rejects_unknown_target(live_runner):

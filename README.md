@@ -63,7 +63,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 多包一层 shell 只会多一层退出码传递风险。
 
 配置有误时服务**启动即报错**，不会拖到第一次调用 Tool——包括 `SPRING_DIR` 指向的检出
-是否真的包含 6 个 ETL 模块、`tools/describe_cli.py` 与 `tools/check_daily.py`
+是否真的包含 7 个 ETL 模块、`tools/describe_cli.py` 与 `tools/check_daily.py`
 （分支过旧是个真实会踩的坑）。
 
 ## 传输方式：stdio 还是 HTTP
@@ -114,7 +114,7 @@ claude 用户  ──HTTP──▶  MCP 服务（rshun 身份常驻）──subp
 | `etl_import_daily` | `etl.import_daily` |
 | `etl_adjust` | `etl.adjust` |
 | `etl_fetch_index` | `etl.fetch_index` |
-| `etl_fill_indicators` | `fill_volratio` / `update_limit` / `fill_shares`，按序串行 |
+| `etl_fill_indicators` | `fill_volratio` / `update_limit` / `fill_shares` / `fill_turnover`，按序串行 |
 
 MCP 层附加参数：
 
@@ -126,7 +126,7 @@ MCP 层附加参数：
 | `stall_timeout` | 自动分档 | 静默多久判为 `stalled` |
 | `max_runtime` | 7200 | 硬上限，超时自动终止 |
 
-`chunk` 只对三个下载型 Tool 开放——三个 `fill_*` 是纯 SQL、无网络，分片没有意义。
+`chunk` 只对三个下载型 Tool 开放——四个 `fill_*` 是纯 SQL、无网络，分片没有意义。
 
 ### 任务管理
 
@@ -188,7 +188,7 @@ queued → running → ┬→ succeeded      exit 0
 ## 测试
 
 ```bash
-pytest -m "not integration"      # 254 项，不需要 spring 在场
+pytest -m "not integration"      # 296 项，不需要 spring 在场
 ```
 
 参数 schema 用固化快照，子进程用临时 python 小脚本。
@@ -196,7 +196,7 @@ pytest -m "not integration"      # 254 项，不需要 spring 在场
 ```bash
 export SPRING_DIR=/path/to/spring
 export SPRING_PYTHON=/path/to/venv/bin/python
-pytest -m integration            # 16 项，需要真实 spring
+pytest -m integration            # 17 项，需要真实 spring
 ```
 
 集成测试里只放**必须凑齐两个仓库才能验证**的事：契约漂移、真实子进程执行、真实日志解析。
@@ -213,12 +213,16 @@ python -m tools.describe_cli --all   # 在 spring 目录下运行，再把日期
 ```
 
 **注意两点**：三个下载型程序的 `begin`/`end` 默认值是「自省当天」，逐日变化，
-必须归一化；生成时**不要加 `sort_keys`**，参数的声明顺序是契约的一部分。
+必须归一化；生成时**不要加 `sort_keys`**，参数的声明顺序是契约的一部分
+（顶层程序名按字母序排列无妨，要保序的是每个程序内部的参数）。
+
+> Windows 上跑这条要带 `PYTHONUTF8=1`：`subprocess` 的 `text=True` 按系统区域编码
+> 解码，GBK 会把 spring 的 UTF-8 中文输出解坏。
 
 ## 不做什么
 
 任意 SQL 写入、任意命令执行、删表清库。写入面收敛在 `schema.PROGRAMS` 白名单内的
-6 个既有 ETL 程序。所有子进程一律 `subprocess.Popen([...], shell=False)`，绝不拼 shell 字符串。
+7 个既有 ETL 程序。所有子进程一律 `subprocess.Popen([...], shell=False)`，绝不拼 shell 字符串。
 
 ## 文档
 
