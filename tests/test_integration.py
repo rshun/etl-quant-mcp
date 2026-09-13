@@ -1,5 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：需要真实 spring 在场的端到端用例
+#   2026-09-13  Claude  日志判据改为「带时间戳的行必须可解析」，不再用 unparsed_lines：
+#                       多行消息的续行与空行也计入该计数，会把跑挂了误报成格式漂移
 """端到端集成测试——**需要真实 spring 环境**。
 
 全部标 `integration`，日常用 `pytest -m "not integration"` 跳过。
@@ -18,6 +20,7 @@ pytest -m integration
 """
 import json
 import os
+import re
 import shutil
 
 import pytest
@@ -181,19 +184,35 @@ def test_log_directory_reachable():
         f"日志目录不存在: {schema.spring_log_dir()}"
 
 
-def test_real_log_parses_without_unparsed_lines():
-    """正例(关键): 真实日志必须能被完整解析。
+# 带时间戳前缀的行 = 一条日志记录的首行。多行消息(如 DuckDB 的异常文本)的续行
+# 没有前缀，本就解析不出来，不该算作格式漂移。
+_TIMESTAMPED = re.compile(r"^\d{2}:\d{2}:\d{2}\s")
 
-    `unparsed_lines` 非零说明 spring 的日志格式漂移了，
-    而 summarize_etl_log 的卡死判据完全建立在解析成功之上。
+
+def test_real_log_record_heads_all_parse():
+    """正例(关键): 真实日志里每条记录的首行都必须能被解析。
+
+    判据只针对**带 `HH:MM:SS` 前缀的行**——那才是 spring 的日志格式本身。
+    解析不了这样的行，才说明格式漂移了，需同步 `logs.LINE_RE`；
+    而 summarize_etl_log 的卡死判据完全建立在这些行解析成功之上。
+
+    刻意**不**断言 `unparsed_lines == 0`：多行消息的续行与空行都会计入该计数，
+    却与格式无关。一条 DuckDB 的 `Catalog Error` 就能带进四五行续行，
+    用那个计数做判据会把「某次跑挂了」误报成「日志格式变了」，
+    把排查方向带偏（2026-09-13 真实踩过）。
     """
     available = logs_mod.list_logs(limit=1)
     if not available:
         pytest.skip("日志目录下暂无 stockdaily*.log")
 
-    summary = logs_mod.summarize_log(available[0]["date"])
-    assert summary["unparsed_lines"] == 0, (
-        f"有 {summary['unparsed_lines']} 行无法解析——"
-        f"spring 的日志格式可能变了，需同步 logs.LINE_RE"
+    date = available[0]["date"]
+    text = logs_mod.log_path(date).read_text(encoding="utf-8", errors="replace")
+    bad = [line for line in text.splitlines()
+           if _TIMESTAMPED.match(line) and logs_mod.parse_line(line) is None]
+    assert not bad, (
+        f"{len(bad)} 行带时间戳却解析不了——spring 的日志格式可能变了，"
+        f"需同步 logs.LINE_RE；首例: {bad[0][:120]!r}"
     )
+
+    summary = logs_mod.summarize_log(date)
     assert summary["modules"], "应至少解析出一个模块"

@@ -177,12 +177,15 @@ downloads but does not write a single byte to the database. Use it first.
 
 Compute adjustment factors and expand them to every trading day.
 
-**Parameters:** as above, minus `print_only`, plus two of its own:
+**Parameters:** as above, minus `print_only`, plus one of its own:
 
 | Name | Type | Default | Notes |
 |---|---|---|---|
 | `source` | string | `local` | `local` computes locally from `CAPITAL_DETAIL` events plus `STOCK_DAILY` closes; `bstock` is **deprecated** — it only records raw events into `ADJ_FACTOR_RAW` and no longer maintains the dense table |
-| `densify` | string | `auto` | Whether to write the per-day `ADJ_FACTOR` table: `auto` (on for `local`, off for `bstock`) / `on` / `off` |
+
+Densification has **no switch**; the source decides it: `local` writes the per-day
+`ADJ_FACTOR` table, `bstock` writes only `ADJ_FACTOR_RAW`. (spring briefly offered
+`--densify`; it was removed on 2026-09-12.)
 
 **Note:** **run it even when no adjustment events occurred in the range.** It is
 also responsible for forward-filling the `ADJ_FACTOR` table up to `end`. "No
@@ -402,6 +405,30 @@ same entry.
 
 **Judge the outcome by `status`** (`complete` / `gaps_found` / `error`), never by
 the exit code — the underlying tool uses a different exit-code convention.
+
+**There is also a `warnings` block** (it grew on 2026-09-13). These are
+**advisory cross-checks**: they only write CSV and logs, and they affect neither
+`status` nor whether a gap is reported. Each entry looks like:
+
+```json
+{"label": "停牌核对", "count": 0, "status": "source_missing", "missing_dates": ["20260912"]}
+```
+
+`status` is one of `ok` / `mismatch` / `source_missing` (the external source has
+nothing for that day, so the check cannot run at all) / `partial` (some days have
+no source) / `error`. The top-level `warnings.unchecked` counts the latter two.
+
+spring added three of these — **停牌核对 / 涨停核对 / 跌停核对** (suspension,
+limit-up and limit-down) — which cross-check the main tables against third-party
+data in `SUSPENSION_DAILY` / `LIMIT_POOL_DAILY`.
+
+> ⚠ **These three will usually report `source_missing`, and this service cannot
+> fix that.** The ETL programs that populate those two tables, `sync_suspension`
+> and `sync_limit_pool`, are not in the allow-list yet, so no tool can run them.
+> When you see these, **do not try to backfill them with `etl_*`** — it will not
+> work. See [`proposal_sync_market_flags.md`](proposal_sync_market_flags.md) for
+> the integration plan. Core quote-gap detection is entirely unaffected; keep
+> using the `core` block as before.
 
 **This tool is read-only and does not enter the serial queue**, so a running
 backfill will not block it. But DuckDB allows only one writer: if a write job

@@ -411,7 +411,7 @@ for line in proc.stdout:                 # 行迭代，配合 -u 实现行级实
 
 | Tool | 底层 | ETL 参数 |
 |------|------|---------|
-| `etl_adjust` | `etl.adjust` | begin, end, codes, exchanges(sh/sz/bj/all), source(local/bstock), densify(auto/on/off) |
+| `etl_adjust` | `etl.adjust` | begin, end, codes, exchanges(sh/sz/bj/all), source(local/bstock) |
 | `etl_import_daily` | `etl.import_daily` | + source(lday/bstock/tdx), print_only |
 | `etl_fetch_index` | `etl.fetch_index` | + source(lday/bstock) |
 | `etl_fill_indicators` | fill_volratio / update_limit / fill_shares / fill_turnover | begin, end, codes, exchanges, forcerun, overwrite(仅 fill_turnover), **targets**（多选，按序串行） |
@@ -1020,6 +1020,24 @@ spring 于 2026-09-10 把 `adjust` 的默认源改为 `local`——复权因子�
 
 待定：是否给 `sync_capital` 开一个无日期参数的 Tool，或在 `etl_adjust` 失败时自动附带提示。
 
+### 15.6 `sync_suspension` / `sync_limit_pool` 未纳入白名单【2026-09-13 新增】
+
+spring 新增两张第三方事实表（`SUSPENSION_DAILY` / `LIMIT_POOL_DAILY`）与对应的两个 ETL，
+并已完成 `describe_cli` / `config/pipeline.yaml` / `test_cli_contract.py` 三处契约注册
+——**自省链路对本服务已经可用**，`describe_cli --list` 现在返回 9 个程序。
+
+同时 `check_daily` 新增三个核对项（停牌 / 涨停 / 跌停一致性），结果落在 `--json` 的
+`warnings.checks[]`。
+
+缺口：`schema.PROGRAMS` 是安全白名单，两个新程序不在其中即无法启动。于是
+`check_data_gaps` 会报出这三项的 `source_missing`，**而模型没有任何 Tool 能补**
+——闭环「check → 定向补 → 复核」在这两项上断在中间。
+
+本轮只在 `check_data_gaps` 的 Tool 说明与使用手册里写明「这三项补不了、别试」，
+避免模型空转；接入方案见 [`proposal_sync_market_flags.md`](proposal_sync_market_flags.md)，
+状态为**待实施**。注意文档不得抢跑：在白名单真正加上之前，USAGE / README / INSTALL
+的程序清单与数量口径一律保持 7 个，否则模型会照着文档去调一个必然被拒的 Tool。
+
 ---
 
 ## 十四、变更记录
@@ -1054,3 +1072,4 @@ spring 于 2026-09-10 把 `adjust` 的默认源改为 `local`——复权因子�
 | 2026-08-21 | Claude | **修复终止竞态**：`_monitor` 在发起终止前即写终态，SIGTERM→宽限期→SIGKILL 期间对外呈现「已结束」，与待重试状态冲突；改为只记录终止意图，终态由 `_run` 原子块统一落定 |
 | 2026-08-22 | Claude | **M6 部署上线**：systemd 常驻（streamable-http，127.0.0.1:8787，以管道属主运行），用户确认部署成功；头部状态改为「已交付并部署上线」；清理 S3 小节两行遗留未勾选重复项 |
 | 2026-09-12 | Claude | **跟进 spring 变更**：`fill_turnover` 并入 `etl_fill_indicators`（新增只对它生效的 `overwrite`）；`etl_adjust` 暴露 `densify` 并改写说明（默认源 `bstock`→`local`、`bstock` 已废弃、新增运行前预检）；重新生成契约快照；`pipeline.yaml` 路径更正为 `config/`；新增 15.5。296 passed，跨仓漂移守卫 9 passed |
+| 2026-09-13 | Claude | **跟进 spring 变更**：spring 移除 `--densify`，同步撤掉 `etl_adjust` 的 `densify` 形参并重生成快照；`check_data_gaps` 的 Tool 说明与 USAGE 中英补 `warnings` 一节（三个新核对项会报 `source_missing` 且本服务补不了）；日志判据由 `unparsed_lines == 0` 改为「带时间戳的行必须可解析」——多行异常的续行会计入前者，曾把「跑挂了」误报成「日志格式变了」；新增 15.6。296 passed，integration 13 passed |

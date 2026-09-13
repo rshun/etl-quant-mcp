@@ -78,22 +78,6 @@
         ],
         "required": false,
         "help": "指定数据源类型: local=本地自算(CAPITAL_DETAIL+STOCK_DAILY, 写ADJ_FACTOR_LOCAL, 默认); bstock=【已废弃】baostock 下载, 仅留痕写 ADJ_FACTOR_RAW, 不再维护稠密表"
-      },
-      "densify": {
-        "flags": [
-          "--densify"
-        ],
-        "type": "str.lower",
-        "action": "store",
-        "nargs": null,
-        "default": "auto",
-        "choices": [
-          "auto",
-          "on",
-          "off"
-        ],
-        "required": false,
-        "help": "是否稠密化写入 ADJ_FACTOR 逐日表: auto=local 源开 / bstock 源关(默认, bstock 只留痕写RAW), on=强制稠密化, off=只写事件表"
       }
     }
   },

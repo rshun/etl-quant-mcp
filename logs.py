@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：ETL 日志的反向读取、过滤与摘要
+#   2026-09-13  Claude  补记：多行消息的续行会计入 unparsed_lines，不代表格式漂移
 """ETL 日志读取与摘要。
 
 日志由 spring 的 `util/myutil.py:configure_etl_logging()` 单点定义，格式固定为：
@@ -13,6 +14,11 @@
    且时间戳会回绕。本模块计算间隔时按「负数即跨天」补 24 小时。
 2. **一天一个文件，当天所有 ETL 程序共用**。所以摘要必须按模块（logger 名）
    分组，否则不同程序的日志会糊在一起。
+3. **一条记录可能跨多行**。异常文本（如 DuckDB 的 `Catalog Error`）会带出若干
+   续行，它们没有 `HH:MM:SS` 前缀，`parse_line` 一律返回 None 并计入
+   `unparsed_lines`。所以 **`unparsed_lines` 非零不等于日志格式变了**——
+   判断格式是否漂移，要看**带时间戳前缀的行**是否还能解析
+   （见 `tests/test_integration.py::test_real_log_record_heads_all_parse`）。
 
 这一层与 runner 的心跳互补：心跳只看得见本服务自己启动的任务，
 看不到 cron 昨晚跑的那一次——那一次只能靠日志复盘。

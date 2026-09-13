@@ -163,12 +163,14 @@ queued → running → ┬→ succeeded       成功
 
 计算复权因子，并稠密化到逐个交易日。
 
-**参数**：同上，但没有 `print_only`，另有两个自己的参数：
+**参数**：同上，但没有 `print_only`，另有一个自己的参数：
 
 | 名称 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `source` | string | `local` | `local`=由 `CAPITAL_DETAIL` 除权事件 + `STOCK_DAILY` 收盘价本地自算；`bstock`=**已废弃**，只留痕写 `ADJ_FACTOR_RAW`、不再维护稠密表 |
-| `densify` | string | `auto` | 是否写 `ADJ_FACTOR` 逐日表：`auto`（`local` 开 / `bstock` 关）/ `on` / `off` |
+
+稠密化**没有开关**，由数据源决定：`local` 写 `ADJ_FACTOR` 逐日表，`bstock` 只写
+`ADJ_FACTOR_RAW`。（spring 曾短暂提供 `--densify`，2026-09-12 已移除。）
 
 **什么时候用**：补复权因子。
 
@@ -372,6 +374,25 @@ queued → running → ┬→ succeeded       成功
 
 **以 `status` 判断结果**（`complete` / `gaps_found` / `error`），
 不要用退出码——它转发的工具是另一套退出码语义。
+
+**还有一块 `warnings`**（2026-09-13 起内容变多）。它是**告警类核对**，只写 CSV 与日志，
+**不影响 `status` 与是否算缺口**。每项形如：
+
+```json
+{"label": "停牌核对", "count": 0, "status": "source_missing", "missing_dates": ["20260912"]}
+```
+
+`status` 取值：`ok` / `mismatch`（对不上）/ `source_missing`（外部源当日无数据，整项没法核）/
+`partial`（部分日期没源）/ `error`。顶层 `warnings.unchecked` 是后两类的计数。
+
+spring 新增了**停牌核对 / 涨停核对 / 跌停核对**三项，它们拿第三方数据
+（`SUSPENSION_DAILY` / `LIMIT_POOL_DAILY`）交叉核对主表。
+
+> ⚠ **这三项目前多半会报 `source_missing`，而且本服务补不了。**
+> 填充这两张表的 `sync_suspension` / `sync_limit_pool` 尚未纳入白名单，
+> 没有对应的 Tool 可调。看到它们时**不要试图用 `etl_*` 去补**——补不进去。
+> 接入方案见 [`proposal_sync_market_flags.md`](proposal_sync_market_flags.md)。
+> 核心日线的缺口判定完全不受这三项影响，`core` 那块照常用。
 
 **它是只读的，不进串行队列**，所以不会被正在跑的补数任务挡住。但 DuckDB 单写者——
 如果此刻有写任务持有写锁，只读连接会打不开，届时会明确报错并提示。

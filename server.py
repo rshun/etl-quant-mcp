@@ -5,6 +5,7 @@
 #   2026-08-19  Claude  支持 streamable-http 传输，使客户端与服务端可分属不同用户
 #   2026-09-12  Claude  跟进 spring：fill_turnover 并入 etl_fill_indicators(新增 overwrite)，
 #                       etl_adjust 暴露 densify 并改写说明(默认源改 local、新增运行前预检)
+#   2026-09-13  Claude  spring 移除 --densify，同步撤掉 etl_adjust 的 densify 形参
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -376,7 +377,6 @@ def etl_adjust(
     codes: list[str] | None = None,
     exchanges: list[str] | None = None,
     source: str | None = None,
-    densify: str | None = None,
     chunk: str = schema.CHUNK_NONE,
     retries: int = 0,
     wait_seconds: int = DEFAULT_WAIT_SECONDS,
@@ -391,7 +391,8 @@ def etl_adjust(
     因此**须先跑 etl_import_daily**，且 CAPITAL_DETAIL 要有数据（由 spring 的
     sync_capital 维护，未纳入本服务）。`bstock` 源已废弃，只留痕写 ADJ_FACTOR_RAW、
     不再维护稠密表，除非你明确要留痕否则不要选它。
-    densify 控制是否写 ADJ_FACTOR 逐日表：auto（默认，local 开 / bstock 关）/ on / off。
+    稠密化不再有开关，由数据源决定：local 写 ADJ_FACTOR 逐日表，bstock 只写
+    ADJ_FACTOR_RAW（spring 2026-09-12 移除了 --densify）。
 
     **失败别急着重跑**：它会在运行前预检 ADJ_FACTOR 缺口（漏跑、上市日起未稠密化、
     区间内部空洞），有缺口即以退出码 1 退出，并在日志里给出该用哪个 -b 回填——
@@ -405,7 +406,6 @@ def etl_adjust(
     return _launch("adjust", {
         "begin": begin, "end": end if end is not None else begin,
         "codes": codes, "exchanges": exchanges, "source": source,
-        "densify": densify,
     }, wait_seconds=wait_seconds, stall_timeout=stall_timeout,
        max_runtime=max_runtime, chunk=chunk, retries=retries)
 
@@ -654,6 +654,12 @@ def check_data_gaps(
 
     以 `status` 判断结果（complete / gaps_found / error），
     **不要**用退出码——check_daily 的退出码是另一套语义。
+
+    返回里还有 `warnings.checks[]`，是告警类交叉核对，不影响 status 与缺口判定。
+    其中「停牌核对 / 涨停核对 / 跌停核对」三项依赖 SUSPENSION_DAILY /
+    LIMIT_POOL_DAILY 两张表，而填充它们的 sync_suspension / sync_limit_pool
+    **尚未纳入本服务白名单**——这三项报 source_missing 时没有 Tool 能补，
+    不要试图用 etl_* 去补。核心日线缺口（core 那块）不受其影响。
 
     本工具只读，不进 ETL 的串行队列，因此不会被正在跑的补数任务挡住；
     但若此刻有写任务持有 DuckDB 写锁，只读连接会打不开，届时会明确报错。
