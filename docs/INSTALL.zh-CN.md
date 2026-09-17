@@ -442,12 +442,16 @@ sudo systemctl daemon-reload
 |---|---|
 | `cancel_job` | 终止一个正在跑的任务。 |
 | `etl_import_daily` | 下载股票日线。 |
-| `etl_adjust` | 下载复权因子。 |
+| `etl_adjust` | 计算复权因子（默认本地自算）。 |
 | `etl_fetch_index` | 下载指数日线。 |
 | `etl_fill_indicators` | 补齐衍生指标。 |
 
-四个 `etl_*` 都接受 `print_only` 参数或很小的日期区间，因此可以放心试：
-`print_only` 会走完整的下载流程但**不写任何数据**。
+想放心试的话，用很小的日期区间（例如只跑一天、只跑一两只股票）。
+
+`etl_import_daily` 另有 `print_only` 干跑开关：走完整下载流程但**不写数据库**，
+改为把每只股票导出成 CSV 到 spring 的 `csv/` 目录——注意它会落文件，不是零副作用，
+而且**必须同时传 `codes`**（否则 spring 会拒绝，见使用手册）。
+其余三个 `etl_*` 没有这个开关。
 
 任务是**排队串行执行**的，因为 DuckDB 只允许一个写者。
 

@@ -163,13 +163,23 @@ Download daily stock quotes into the database.
 | `codes` | array | whole market | Specific stock codes |
 | `exchanges` | array | `["all"]` | Exchange filter; `codes` takes precedence |
 | `source` | string | `bstock` | `lday` / `bstock` / `tdx` |
-| `print_only` | bool | `false` | **Dry run**: performs the full download, writes nothing |
+| `print_only` | bool | `false` | **Dry run**: full download, no database write; exports CSV instead. **Requires `codes`** |
 
 **When to use it:** filling in a missing day of quotes. This is the workhorse of
 the gap-filling loop.
 
-**Note:** `print_only=true` is the safest way to try this service. It genuinely
-downloads but does not write a single byte to the database. Use it first.
+**Note (semantics changed 2026-09-17):** `print_only=true` really does download,
+but it writes **nothing to the database** — instead it exports one pair of CSV
+files per stock into spring's `csv/` directory
+(`<code>_daily_<begin>_<end>.csv` and `<code>_basic_<begin>_<end>.csv`; a stock
+with no data produces no file).
+
+So it is **no longer side-effect free**: the database is untouched, but files are
+left on disk.
+
+**You must pass `codes` with it.** Without them the candidate set is the whole
+market — over five thousand pairs of files in one go — so spring refuses outright
+and exits with code 2. Pass one or two stocks when trying it out.
 
 ---
 
@@ -495,7 +505,10 @@ anything over 3650 days is rejected outright.
 etl_import_daily(begin=<a trading day>, codes=["600519"], print_only=true)
 ```
 
-A dry run: the full download path, nothing written, back in a couple of seconds.
+A dry run: the full download path, nothing written to the database, back in a
+couple of seconds. Results land as CSV in spring's `csv/` directory. `codes` is
+**required** for a dry run — drop it and the call is rejected (see the
+`etl_import_daily` section).
 
 ---
 

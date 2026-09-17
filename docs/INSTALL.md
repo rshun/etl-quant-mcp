@@ -466,13 +466,19 @@ Thirteen tools are exposed.
 |---|---|
 | `cancel_job` | Stop a running job. |
 | `etl_import_daily` | Download daily stock quotes. |
-| `etl_adjust` | Download adjustment factors. |
+| `etl_adjust` | Compute adjustment factors (locally by default). |
 | `etl_fetch_index` | Download index quotes. |
 | `etl_fill_indicators` | Fill derived indicators. |
 
-The four `etl_*` tools accept `print_only` or a small date range, which makes
-them safe to try: `print_only` performs the full download without writing
-anything to the database.
+To try them safely, use a very small date range — a single day, one or two
+stocks.
+
+`etl_import_daily` also has a `print_only` dry-run switch: it performs the full
+download but writes **nothing to the database**, exporting one CSV pair per stock
+into spring's `csv/` directory instead. Note that it does leave files behind, so
+it is not side-effect free, and it **requires `codes`** (spring rejects it
+otherwise — see the usage manual). The other three `etl_*` tools have no such
+switch.
 
 Jobs are queued and run **one at a time**, because DuckDB permits only one
 writer.

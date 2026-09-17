@@ -2,6 +2,7 @@
 #   2026-08-19  Claude  新建：需要真实 spring 在场的端到端用例
 #   2026-09-13  Claude  日志判据改为「带时间戳的行必须可解析」，不再用 unparsed_lines：
 #                       多行消息的续行与空行也计入该计数，会把跑挂了误报成格式漂移
+#   2026-09-17  Claude  -p 语义变更(导出 CSV、必须带 -c)，同步干跑用例的注释
 """端到端集成测试——**需要真实 spring 环境**。
 
 全部标 `integration`，日常用 `pytest -m "not integration"` 跳过。
@@ -100,7 +101,12 @@ def test_describe_cli_rejects_unregistered_program():
 def test_dry_run_succeeds_end_to_end(runner):
     """正例(核心): 构造 argv → 起真实子进程 → 读退出码，全链路走通。
 
-    用 -p 干跑：走完整的下载路径但不写库，对真实数据库无副作用。
+    用 -p 干跑：走完整的下载路径但**不写数据库**。
+
+    注意它不是零副作用——spring 2026-09-17 起把 -p 改成按股票导出 CSV 到
+    `<SPRING_DIR>/csv/`，所以本用例会在那里留下 600519 的两个文件。
+    数据库不受影响，这也是本用例敢对真实环境跑的前提。
+    codes 是**必传**的：spring 会拒绝不带 -c 的 -p（否则全市场五千多对文件）。
     """
     argv = params.build_argv("import_daily", {
         "begin": "20260817", "end": "20260817",

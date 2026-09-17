@@ -150,12 +150,18 @@ queued → running → ┬→ succeeded       成功
 | `codes` | array | 全市场 | 指定股票代码 |
 | `exchanges` | array | `["all"]` | 指定交易所，`codes` 优先级更高 |
 | `source` | string | `bstock` | `lday` / `bstock` / `tdx` |
-| `print_only` | bool | `false` | **干跑**：走完整下载流程但不写库 |
+| `print_only` | bool | `false` | **干跑**：走完整下载流程但不写库，改为导出 CSV；**必须同时传 `codes`** |
 
 **什么时候用**：补某天的日线数据。这是补数闭环里最常用的一个。
 
-**注意**：`print_only=true` 是最安全的试手方式——它真的会去下载，但一个字节都不写库。
-第一次用这个服务时建议先干跑一次。
+**注意**（2026-09-17 语义变更）：`print_only=true` 会真的去下载，但**不写数据库**——
+改为把每只股票导出成一对 CSV 到 spring 的 `csv/` 目录
+（`<code>_daily_<begin>_<end>.csv` 与 `<code>_basic_<begin>_<end>.csv`，该股无数据则不产出）。
+
+所以它**不再是零副作用**：不碰数据库，但会在磁盘上留下文件。
+
+**必须同时传 `codes`**。不传的话候选是全市场，一次就是五千多对文件，spring 因此
+直接拒绝并以退出码 2 退出。第一次试手时传一两只股票即可。
 
 ---
 
@@ -452,7 +458,8 @@ etl_import_daily(begin=20200101, end=20261231, chunk="year", retries=1)
 etl_import_daily(begin=<某个交易日>, codes=["600519"], print_only=true)
 ```
 
-干跑，走完整下载流程但不写库，两秒返回。
+干跑，走完整下载流程但不写库，两秒返回。结果以 CSV 落在 spring 的 `csv/` 目录，
+不进数据库。`codes` 在干跑时是**必填**的——去掉它会被拒绝（见 `etl_import_daily` 一节）。
 
 ---
 

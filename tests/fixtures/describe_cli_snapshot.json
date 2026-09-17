@@ -505,7 +505,7 @@
         "default": false,
         "choices": null,
         "required": false,
-        "help": "仅将获取结果（含列名）输出到屏幕，不写入数据库"
+        "help": "仅把获取结果按股票导出为 CSV 到 csv/ 目录，不写入数据库；必须同时指定 -c。文件名 <code>_daily_<begin>_<end>.csv 与 <code>_basic_<begin>_<end>.csv，该股无数据则不产出对应文件"
       }
     }
   },

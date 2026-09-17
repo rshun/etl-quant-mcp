@@ -6,6 +6,8 @@
 #   2026-09-12  Claude  跟进 spring：fill_turnover 并入 etl_fill_indicators(新增 overwrite)，
 #                       etl_adjust 暴露 densify 并改写说明(默认源改 local、新增运行前预检)
 #   2026-09-13  Claude  spring 移除 --densify，同步撤掉 etl_adjust 的 densify 形参
+#   2026-09-17  Claude  spring 把 -p 改为按股票导出 CSV 且必须带 -c，同步改写
+#                       etl_import_daily 的干跑说明（原文会诱导模型漏传 codes）
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -354,7 +356,10 @@ def etl_import_daily(
 
     begin/end 为 YYYYMMDD；end 省略时等于 begin（只跑单日）。
     codes 形如 ["600519", "000001.SZ"]，不传则按 exchanges 处理全市场。
-    print_only=True 为干跑：只把结果打到屏幕，不写库，适合先验证一遍。
+    print_only=True 为干跑：走完整下载路径但不写库，改为把每只股票导出成 CSV
+    到 spring 的 csv/ 目录（<code>_daily_… 与 <code>_basic_…）。
+    **它必须同时传 codes**——不传会对全市场每只股票各产出一对文件，spring 因此
+    直接拒绝并以退出码 2 退出。所以干跑只适合验证单只或少数几只。
     wait_seconds 内跑完直接返回结果，否则转后台并返回 job_id。
     
     chunk 可设 month / year 按自然月或年分片：每段一个任务串行执行，
