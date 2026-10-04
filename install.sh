@@ -9,7 +9,8 @@
 # It deliberately does NOT run any command that needs root. The final three
 # `sudo` commands are printed for you to review and run yourself.
 #
-# Usage:  ./install.sh --spring-dir DIR --spring-python PATH [options]
+# Usage:  ./install.sh --spring-dir DIR --spring-python PATH [options]   (source checkout)
+#         ./install.sh --spring-bin-dir DIR --spring-home DIR [options]  (installed package)
 # Help:   ./install.sh --help
 #
 set -euo pipefail
@@ -22,7 +23,9 @@ INSTALL_DIR="$SCRIPT_DIR"
 VENV_DIR=""                      # defaults to $INSTALL_DIR/.venv
 SPRING_DIR=""
 SPRING_PYTHON=""
-SPRING_LOG_DIR=""                # optional; defaults to $SPRING_DIR/log
+SPRING_BIN_DIR=""                # installed package: dir holding the spring-* commands
+SPRING_HOME=""                   # installed package: spring runtime dir (config/ log/ ...)
+SPRING_LOG_DIR=""                # optional; defaults to <spring-home>/log or <spring-dir>/log
 HOST="127.0.0.1"
 PORT="16000"
 TRANSPORT="streamable-http"
@@ -51,10 +54,16 @@ usage() {
     cat <<'USAGE'
 quant-etl MCP server installer
 
-REQUIRED
+REQUIRED - pick ONE pair, matching how spring is deployed
+
+  Source checkout:
   --spring-dir DIR        Root of the spring ETL checkout (contains etl/ and tools/)
   --spring-python PATH    Python interpreter of spring's virtualenv.
                           Point at the interpreter itself, NOT a wrapper script.
+
+  Installed package (wheel):
+  --spring-bin-dir DIR    Directory holding the spring-* commands, e.g. /opt/spring/bin
+  --spring-home DIR       spring runtime dir (SPRING_HOME) containing config/config.yaml
 
 OPTIONAL
   --install-dir DIR       Where this repo lives            (default: this script's directory)
@@ -65,17 +74,24 @@ OPTIONAL
   --service-name NAME     systemd unit name                (default: quant-etl-mcp)
   --service-user USER     User the service runs as         (default: current user)
   --service-group GROUP   Group the service runs as        (default: current user's group)
-  --log-dir DIR           ETL log directory                (default: <spring-dir>/log)
+  --log-dir DIR           ETL log directory                (default: <spring-home>/log or <spring-dir>/log)
   --max-runtime SECONDS   Hard timeout per job             (default: 7200)
   --stall-timeout SECONDS Silence before a job is 'stalled'(default: auto by date span)
   --python PATH           Python used to build the venv    (default: python3)
   --check                 Validate only; create nothing
   -h, --help              Show this message
 
-EXAMPLE
+EXAMPLES
+  # source checkout
   ./install.sh \
       --spring-dir /home/rshun/src/spring \
       --spring-python /home/rshun/src/venv_stock/bin/python3 \
+      --port 8787
+
+  # installed package
+  ./install.sh \
+      --spring-bin-dir /opt/spring/bin \
+      --spring-home /srv/spring \
       --port 8787
 
 The service must run as the user that owns the ETL data. See docs/INSTALL.md.
@@ -90,6 +106,8 @@ while [ $# -gt 0 ]; do
         --venv)           VENV_DIR="$2"; shift 2 ;;
         --spring-dir)     SPRING_DIR="$2"; shift 2 ;;
         --spring-python)  SPRING_PYTHON="$2"; shift 2 ;;
+        --spring-bin-dir) SPRING_BIN_DIR="$2"; shift 2 ;;
+        --spring-home)    SPRING_HOME="$2"; shift 2 ;;
         --log-dir)        SPRING_LOG_DIR="$2"; shift 2 ;;
         --host)           HOST="$2"; shift 2 ;;
         --port)           PORT="$2"; shift 2 ;;
@@ -106,18 +124,39 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$SPRING_DIR" ]    || die "--spring-dir is required. Try --help."
-[ -n "$SPRING_PYTHON" ] || die "--spring-python is required. Try --help."
+# The two deployment modes use different variables; mixing them would leave the
+# server's working directory and launch method ambiguous.
+if [ -n "$SPRING_BIN_DIR$SPRING_HOME" ]; then
+    MODE="installed"
+    [ -z "$SPRING_DIR$SPRING_PYTHON" ] \
+        || die "Use either --spring-dir/--spring-python (source checkout)
+       or --spring-bin-dir/--spring-home (installed package), not both."
+    [ -n "$SPRING_BIN_DIR" ] || die "--spring-bin-dir is required with --spring-home. Try --help."
+    [ -n "$SPRING_HOME" ]    || die "--spring-home is required with --spring-bin-dir. Try --help."
+else
+    MODE="source"
+    [ -n "$SPRING_DIR" ]    || die "--spring-dir is required. Try --help."
+    [ -n "$SPRING_PYTHON" ] || die "--spring-python is required. Try --help."
+fi
 
 # Normalise to absolute paths so the systemd unit is unambiguous.
 # Keep the originals: on failure the substitution yields an empty string,
 # and the error message must still show what the user actually typed.
 _INSTALL_DIR_IN="$INSTALL_DIR"
-_SPRING_DIR_IN="$SPRING_DIR"
 INSTALL_DIR="$(cd "$_INSTALL_DIR_IN" 2>/dev/null && pwd)" \
     || die "--install-dir does not exist: $_INSTALL_DIR_IN"
-SPRING_DIR="$(cd "$_SPRING_DIR_IN" 2>/dev/null && pwd)" \
-    || die "--spring-dir does not exist or is not readable by $(id -un): $_SPRING_DIR_IN"
+if [ "$MODE" = "source" ]; then
+    _SPRING_DIR_IN="$SPRING_DIR"
+    SPRING_DIR="$(cd "$_SPRING_DIR_IN" 2>/dev/null && pwd)" \
+        || die "--spring-dir does not exist or is not readable by $(id -un): $_SPRING_DIR_IN"
+else
+    _SPRING_BIN_DIR_IN="$SPRING_BIN_DIR"
+    _SPRING_HOME_IN="$SPRING_HOME"
+    SPRING_BIN_DIR="$(cd "$_SPRING_BIN_DIR_IN" 2>/dev/null && pwd)" \
+        || die "--spring-bin-dir does not exist or is not readable by $(id -un): $_SPRING_BIN_DIR_IN"
+    SPRING_HOME="$(cd "$_SPRING_HOME_IN" 2>/dev/null && pwd)" \
+        || die "--spring-home does not exist or is not readable by $(id -un): $_SPRING_HOME_IN"
+fi
 [ -n "$VENV_DIR" ] || VENV_DIR="$INSTALL_DIR/.venv"
 
 # ---------------------------------------------------------------- checks
@@ -152,24 +191,44 @@ ok "venv module available"
     || die "requirements.txt not found in $INSTALL_DIR"
 ok "Found this project at $INSTALL_DIR"
 
-# The spring checkout must contain everything the server shells out to.
-MISSING=""
-for rel in etl/adjust.py etl/import_daily.py etl/fetch_index.py \
-           etl/fill_volratio.py etl/update_limit.py etl/fill_shares.py \
-           tools/describe_cli.py tools/check_daily.py; do
-    [ -f "$SPRING_DIR/$rel" ] || MISSING="$MISSING\n       - $rel"
-done
-[ -z "$MISSING" ] || die "The spring checkout at $SPRING_DIR is missing:$(printf "$MISSING")
+if [ "$MODE" = "source" ]; then
+    # The spring checkout must contain everything the server shells out to.
+    MISSING=""
+    for rel in etl/adjust.py etl/import_daily.py etl/fetch_index.py \
+               etl/fill_volratio.py etl/update_limit.py etl/fill_shares.py \
+               tools/describe_cli.py tools/check_daily.py; do
+        [ -f "$SPRING_DIR/$rel" ] || MISSING="$MISSING\n       - $rel"
+    done
+    [ -z "$MISSING" ] || die "The spring checkout at $SPRING_DIR is missing:$(printf "$MISSING")
 
        This usually means the checkout is on an outdated branch.
        Run 'git -C $SPRING_DIR status' and switch to the branch that has these files."
-ok "spring checkout looks complete"
+    ok "spring checkout looks complete"
 
-[ -x "$SPRING_PYTHON" ] \
-    || die "--spring-python is not executable by $(id -un): $SPRING_PYTHON
+    [ -x "$SPRING_PYTHON" ] \
+        || die "--spring-python is not executable by $(id -un): $SPRING_PYTHON
        Point it at spring's virtualenv interpreter, e.g. .../venv/bin/python3
        Do NOT point it at a wrapper shell script."
-ok "spring interpreter is executable"
+    ok "spring interpreter is executable"
+else
+    # Every command the server shells out to must exist and be executable.
+    MISSING=""
+    for cmd in spring-adjust spring-import-daily spring-fetch-index \
+               spring-fill-volratio spring-update-limit spring-fill-shares \
+               spring-fill-turnover spring-describe-cli spring-check-daily; do
+        [ -x "$SPRING_BIN_DIR/$cmd" ] || MISSING="$MISSING\n       - $cmd"
+    done
+    [ -z "$MISSING" ] || die "Missing or not executable by $(id -un) in $SPRING_BIN_DIR:$(printf "$MISSING")
+
+       Point --spring-bin-dir at the bin/ of the environment spring was installed into,
+       and make sure the installed spring version provides these commands."
+    ok "spring commands found in $SPRING_BIN_DIR"
+
+    [ -f "$SPRING_HOME/config/config.yaml" ] \
+        || die "No config/config.yaml under --spring-home: $SPRING_HOME
+       Run 'SPRING_HOME=$SPRING_HOME $SPRING_BIN_DIR/spring-init' once, then edit the config."
+    ok "spring runtime dir looks complete"
+fi
 
 case "$TRANSPORT" in
     stdio|streamable-http|sse) ok "Transport: $TRANSPORT" ;;
@@ -222,10 +281,17 @@ ok "Dependencies installed (only 'mcp'; the heavy work runs in spring's interpre
 
 step "Verifying the server can start"
 
-SMOKE_ENV=(
-    "SPRING_DIR=$SPRING_DIR"
-    "SPRING_PYTHON=$SPRING_PYTHON"
-)
+if [ "$MODE" = "source" ]; then
+    SMOKE_ENV=(
+        "SPRING_DIR=$SPRING_DIR"
+        "SPRING_PYTHON=$SPRING_PYTHON"
+    )
+else
+    SMOKE_ENV=(
+        "SPRING_BIN_DIR=$SPRING_BIN_DIR"
+        "SPRING_HOME=$SPRING_HOME"
+    )
+fi
 [ -n "$SPRING_LOG_DIR" ] && SMOKE_ENV+=("SPRING_LOG_DIR=$SPRING_LOG_DIR")
 
 if ! env "${SMOKE_ENV[@]}" "$VENV_DIR/bin/python" -c "
@@ -250,8 +316,13 @@ params.fetch_program_schema('import_daily')
 " >/dev/null 2>&1; then
     ok "Introspection of spring's CLI succeeded"
 else
-    die "Could not introspect spring's CLI.
+    if [ "$MODE" = "source" ]; then
+        die "Could not introspect spring's CLI.
        Try manually:  cd $SPRING_DIR && $SPRING_PYTHON -m tools.describe_cli --list"
+    else
+        die "Could not introspect spring's CLI.
+       Try manually:  SPRING_HOME=$SPRING_HOME $SPRING_BIN_DIR/spring-describe-cli --list"
+    fi
 fi
 
 # ---------------------------------------------------------------- systemd unit
@@ -265,9 +336,10 @@ mkdir -p "$INSTALL_DIR/deploy"
     cat <<UNIT
 # Generated by install.sh on $(date '+%Y-%m-%d %H:%M:%S')
 #
-# The service MUST run as the user that owns the ETL data. spring resolves its
-# database path with ~ expansion, so a different user silently writes to a
-# different database file. See docs/INSTALL.md, "Why the service user matters".
+# The service user must be able to write spring's database and runtime dirs.
+# If spring's config writes the database path with ~, it expands per user, so a
+# different user silently writes to a different database file.
+# See docs/INSTALL.md, "Why the service user matters".
 
 [Unit]
 Description=quant-etl MCP server (ETL scheduling for spring)
@@ -280,8 +352,15 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/server.py
 
-Environment=SPRING_DIR=$SPRING_DIR
-Environment=SPRING_PYTHON=$SPRING_PYTHON
+UNIT
+    if [ "$MODE" = "source" ]; then
+        echo "Environment=SPRING_DIR=$SPRING_DIR"
+        echo "Environment=SPRING_PYTHON=$SPRING_PYTHON"
+    else
+        echo "Environment=SPRING_BIN_DIR=$SPRING_BIN_DIR"
+        echo "Environment=SPRING_HOME=$SPRING_HOME"
+    fi
+    cat <<UNIT
 Environment=ETL_MCP_TRANSPORT=$TRANSPORT
 Environment=ETL_MCP_HOST=$HOST
 Environment=ETL_MCP_PORT=$PORT

@@ -78,11 +78,24 @@ ETL 照常跑完、退出码 0、日志一切正常——数据默默进了错�
 这也正是 HTTP 传输存在的理由。你的 AI 客户端可以是完全不同的用户——没关系，
 因为客户端只说 HTTP。**只有服务端必须是数据属主。**
 
+> **例外：spring 按安装包部署、且 `config.yaml` 里的库路径写成绝对路径**
+> （如 `/srv/data/quant.db`）时，上面的 `~` 陷阱不存在。这时服务用户不必是数据属主，
+> 只需对数据库所在目录和 spring 运行目录（`SPRING_HOME`）的 `log/` `csv/` `download/`
+> 有读写权限。注意与 `cron` 跑 ETL 的用户共写同一批文件时，两边都要用 `umask 002`
+> 并共享属组，否则一方新建的文件另一方写不进去。
+
 ---
 
 ## 四、前置条件
 
 本节所有命令都**以 ETL 数据属主（`rshun`）的身份**执行。
+
+spring 有两种部署方式，本服务都支持，按你的实际情况二选一：
+
+| spring 部署方式 | 看哪几节 | 本服务用的环境变量 |
+|---|---|---|
+| 源码检出 | 4.1、4.2、4.3、4.4 | `SPRING_DIR` + `SPRING_PYTHON` |
+| 安装包（wheel） | 4.3、4.4、4.5 | `SPRING_BIN_DIR` + `SPRING_HOME` |
 
 ### 4.1 一份可用的 spring 检出
 
@@ -131,6 +144,25 @@ sudo apt install python3-venv
 git clone https://github.com/rshun/etl-quant-mcp.git /home/rshun/src/etl-quant-mcp
 ```
 
+### 4.5 安装包部署的 spring
+
+确认 `spring-*` 命令和运行目录的配置文件都在（下例命令装在 `/opt/spring/bin`、
+运行目录是 `/srv/spring`，按实际替换）：
+
+```bash
+ls /opt/spring/bin/spring-describe-cli /opt/spring/bin/spring-import-daily
+ls /srv/spring/config/config.yaml
+```
+
+配置文件不存在说明运行目录还没初始化，先运行一次 `SPRING_HOME=/srv/spring /opt/spring/bin/spring-init`
+再按本机修改配置。
+
+命令本身是 Python 脚本，第一行指向安装环境的解释器，服务用户必须能执行它：
+
+```bash
+head -1 /opt/spring/bin/spring-import-daily
+```
+
 ---
 
 ## 五、安装
@@ -143,6 +175,16 @@ cd /home/rshun/src/etl-quant-mcp
     --spring-dir    /home/rshun/src/spring \
     --spring-python /home/rshun/src/venv_stock/bin/python3
 ```
+
+spring 是安装包部署时，换成：
+
+```bash
+./install.sh \
+    --spring-bin-dir /opt/spring/bin \
+    --spring-home    /srv/spring
+```
+
+两组参数不能混用。
 
 脚本会做四件事：
 
@@ -170,7 +212,7 @@ cd /home/rshun/src/etl-quant-mcp
 | `--service-user USER` | 当前用户 | 必须是 ETL 数据属主。 |
 | `--service-name NAME` | `quant-etl-mcp` | systemd 服务名。 |
 | `--venv DIR` | `<仓库>/.venv` | |
-| `--log-dir DIR` | `<spring 目录>/log` | ETL 日志所在目录。 |
+| `--log-dir DIR` | `<spring 运行目录>/log` | ETL 日志所在目录。源码部署时运行目录就是 spring 检出目录。 |
 | `--transport MODE` | `streamable-http` | 只有客户端与服务端同用户时才用 `stdio`。 |
 
 完整选项见 `./install.sh --help`。
@@ -297,9 +339,11 @@ sudo systemctl daemon-reload && sudo systemctl restart quant-etl-mcp
 
 | 变量 | 必填 | 默认值 | 含义 |
 |---|---|---|---|
-| `SPRING_DIR` | 是 | — | spring 检出的根目录，用作 ETL 子进程的工作目录。 |
-| `SPRING_PYTHON` | 是 | — | spring 虚拟环境的解释器。必须是解释器本身，不能是包装脚本。 |
-| `SPRING_LOG_DIR` | 否 | `$SPRING_DIR/log` | ETL 日志所在目录。任务记录存在其下的 `mcp_jobs/`。 |
+| `SPRING_DIR` | 源码部署必填 | — | spring 检出的根目录，用作 ETL 子进程的工作目录。 |
+| `SPRING_PYTHON` | 源码部署必填 | — | spring 虚拟环境的解释器。必须是解释器本身，不能是包装脚本。 |
+| `SPRING_BIN_DIR` | 安装包部署必填 | — | `spring-*` 命令所在目录（如 `/opt/spring/bin`）。设了它就按安装包部署运行，直接调用命令，不再经 `python -m`。不能与 `SPRING_DIR` 同时设置。 |
+| `SPRING_HOME` | 安装包部署必填 | — | spring 运行目录（含 `config/config.yaml`），用作 ETL 子进程的工作目录，并原样传给 spring。不设的话 spring 会回落到运行用户的 `~/.spring`。 |
+| `SPRING_LOG_DIR` | 否 | `$SPRING_HOME/log`，未设 `SPRING_HOME` 时为 `$SPRING_DIR/log` | ETL 日志所在目录。任务记录存在其下的 `mcp_jobs/`。 |
 | `ETL_MCP_TRANSPORT` | 否 | `stdio` | `stdio` / `streamable-http` / `sse`。 |
 | `ETL_MCP_HOST` | 否 | `127.0.0.1` | 绑定地址。非回环地址会打印告警。 |
 | `ETL_MCP_PORT` | 否 | `8787` | 监听端口。 |
@@ -343,6 +387,20 @@ systemctl cat quant-etl-mcp
 ### `No module named tools.describe_cli`
 
 与第一条同因——spring 检出过旧。新版本的本服务会在启动时就拦下并给出更清楚的提示。
+
+### `程序 'xxx' 的命令不存在` / `参数自省出口 的命令不存在`（安装包部署）
+
+`SPRING_BIN_DIR` 指错了目录，或者装的 spring 版本还没有这个命令。确认
+`SPRING_BIN_DIR` 是 spring 安装环境的 `bin/`，并升级 spring 安装包。
+
+### `SPRING_HOME 下缺少配置文件`（安装包部署）
+
+运行目录还没初始化：以服务用户身份运行一次 `SPRING_HOME=<运行目录> <bin 目录>/spring-init`，
+再按本机修改 `config/config.yaml`。
+
+### `SPRING_DIR 与 SPRING_BIN_DIR 只能设置一个`
+
+unit 里同时写了两种部署方式的变量。按 spring 的实际部署方式删掉另一组。
 
 ### `Address already in use`
 

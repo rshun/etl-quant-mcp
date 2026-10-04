@@ -3,6 +3,7 @@
 #   2026-09-13  Claude  日志判据改为「带时间戳的行必须可解析」，不再用 unparsed_lines：
 #                       多行消息的续行与空行也计入该计数，会把跑挂了误报成格式漂移
 #   2026-09-17  Claude  -p 语义变更(导出 CSV、必须带 -c)，同步干跑用例的注释
+#   2026-10-04  Claude  支持在 spring 安装包部署(SPRING_BIN_DIR + SPRING_HOME)下运行
 """端到端集成测试——**需要真实 spring 环境**。
 
 全部标 `integration`，日常用 `pytest -m "not integration"` 跳过。
@@ -11,8 +12,13 @@
 跑起来需要：
 
 ```bash
+# 源码部署
 export SPRING_DIR=/path/to/spring
 export SPRING_PYTHON=/path/to/venv/bin/python
+# 或安装包部署
+export SPRING_BIN_DIR=/path/to/spring-env/bin
+export SPRING_HOME=/path/to/spring-home
+
 pytest -m integration
 ```
 
@@ -38,19 +44,21 @@ SNAPSHOT = load_snapshot()
 
 
 def _env_ready() -> bool:
-    return bool(os.environ.get("SPRING_DIR") and os.environ.get("SPRING_PYTHON"))
+    source = os.environ.get("SPRING_DIR") and os.environ.get("SPRING_PYTHON")
+    installed = os.environ.get("SPRING_BIN_DIR") and os.environ.get("SPRING_HOME")
+    return bool(source or installed)
 
 
-pytest_skip = pytest.mark.skipif(
-    not _env_ready(),
-    reason="需要 SPRING_DIR / SPRING_PYTHON 指向真实 spring 环境",
-)
+_SKIP_REASON = ("需要真实 spring 环境：SPRING_DIR + SPRING_PYTHON(源码部署)"
+                "或 SPRING_BIN_DIR + SPRING_HOME(安装包部署)")
+
+pytest_skip = pytest.mark.skipif(not _env_ready(), reason=_SKIP_REASON)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_env():
     if not _env_ready():
-        pytest.skip("需要 SPRING_DIR / SPRING_PYTHON 指向真实 spring 环境")
+        pytest.skip(_SKIP_REASON)
 
 
 @pytest.fixture
@@ -104,7 +112,7 @@ def test_dry_run_succeeds_end_to_end(runner):
     用 -p 干跑：走完整的下载路径但**不写数据库**。
 
     注意它不是零副作用——spring 2026-09-17 起把 -p 改成按股票导出 CSV 到
-    `<SPRING_DIR>/csv/`，所以本用例会在那里留下 600519 的两个文件。
+    spring 运行目录的 `csv/` 下，所以本用例会在那里留下 600519 的两个文件。
     数据库不受影响，这也是本用例敢对真实环境跑的前提。
     codes 是**必传**的：spring 会拒绝不带 -c 的 -p（否则全市场五千多对文件）。
     """
@@ -140,8 +148,9 @@ def test_argparse_usage_error_exits_2(runner):
 
     钉住它是因为 2 曾被设计为「部分成功」——那会把「参数传错」读成「大体成功」。
     """
-    interpreter = str(schema.spring_python())
-    argv = [interpreter, "-u", "-m", "etl.import_daily", "-s", "nosuch_source"]
+    # 绕过 build_argv 的枚举校验，才能让非法值真正到达 spring 的 argparse
+    argv = [*params._command_prefix("etl.import_daily", None, unbuffered=True),
+            "-s", "nosuch_source"]
     job_id = runner.submit("import_daily", argv, stall_timeout=60, max_runtime=120)
     info = runner.wait(job_id, timeout=120)
 
@@ -157,7 +166,7 @@ def test_check_daily_json_output_is_parseable():
     argv = params.build_check_argv({
         "begin": "20260817", "end": "20260817", "codes": ["600519"],
     })
-    proc = subprocess.run(argv, cwd=str(schema.spring_dir()),
+    proc = subprocess.run(argv, cwd=str(schema.spring_workdir()),
                           capture_output=True, text=True, timeout=300)
     payload = json.loads(proc.stdout)
 
@@ -175,7 +184,7 @@ def test_check_daily_stdout_carries_no_log_lines():
     """
     import subprocess
     argv = params.build_check_argv({"begin": "20260817", "end": "20260817"})
-    proc = subprocess.run(argv, cwd=str(schema.spring_dir()),
+    proc = subprocess.run(argv, cwd=str(schema.spring_workdir()),
                           capture_output=True, text=True, timeout=300)
     json.loads(proc.stdout)          # 解析不了就直接失败
     assert "[INFO]" not in proc.stdout

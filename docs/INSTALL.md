@@ -84,11 +84,26 @@ This is also precisely why the HTTP transport exists. Your AI client may run as
 a completely different user — that is fine, because the client only speaks HTTP.
 Only the *server* has to be the data owner.
 
+> **Exception: spring deployed as an installed package with an absolute database
+> path in `config.yaml`** (e.g. `/srv/data/quant.db`). The `~` trap above does not
+> apply. The service user then need not be the data owner; it only needs read-write
+> access to the database directory and to `log/`, `csv/`, `download/` under spring's
+> runtime dir (`SPRING_HOME`). If it shares those files with the user `cron` runs the
+> ETL as, both sides must use `umask 002` and a shared group — otherwise a file
+> created by one cannot be written by the other.
+
 ---
 
 ## 4. Prerequisites
 
 Run every command in this section **as the ETL data owner** (`rshun`).
+
+This service supports both ways spring can be deployed. Pick the one you use:
+
+| spring deployment | Sections | Variables this service uses |
+|---|---|---|
+| Source checkout | 4.1, 4.2, 4.3, 4.4 | `SPRING_DIR` + `SPRING_PYTHON` |
+| Installed package (wheel) | 4.3, 4.4, 4.5 | `SPRING_BIN_DIR` + `SPRING_HOME` |
 
 ### 4.1 A working `spring` checkout
 
@@ -138,6 +153,26 @@ sudo apt install python3-venv
 git clone https://github.com/rshun/etl-quant-mcp.git /home/rshun/src/etl-quant-mcp
 ```
 
+### 4.5 spring as an installed package
+
+Check that the `spring-*` commands and the runtime config exist (the example uses
+commands in `/opt/spring/bin` and runtime dir `/srv/spring`; substitute yours):
+
+```bash
+ls /opt/spring/bin/spring-describe-cli /opt/spring/bin/spring-import-daily
+ls /srv/spring/config/config.yaml
+```
+
+A missing config means the runtime dir was never initialised. Run
+`SPRING_HOME=/srv/spring /opt/spring/bin/spring-init` once, then edit the config.
+
+Each command is a Python script whose first line names the installed interpreter;
+the service user must be able to execute it:
+
+```bash
+head -1 /opt/spring/bin/spring-import-daily
+```
+
 ---
 
 ## 5. Installation
@@ -150,6 +185,16 @@ cd /home/rshun/src/etl-quant-mcp
     --spring-dir    /home/rshun/src/spring \
     --spring-python /home/rshun/src/venv_stock/bin/python3
 ```
+
+If spring is an installed package, use instead:
+
+```bash
+./install.sh \
+    --spring-bin-dir /opt/spring/bin \
+    --spring-home    /srv/spring
+```
+
+The two pairs cannot be mixed.
 
 The installer:
 
@@ -177,7 +222,7 @@ To validate your setup without creating anything:
 | `--service-user USER` | current user | Must be the ETL data owner. |
 | `--service-name NAME` | `quant-etl-mcp` | The systemd unit name. |
 | `--venv DIR` | `<repo>/.venv` | |
-| `--log-dir DIR` | `<spring-dir>/log` | Where the ETL writes its logs. |
+| `--log-dir DIR` | `<spring runtime dir>/log` | Where the ETL writes its logs. For a source checkout the runtime dir is the checkout itself. |
 | `--transport MODE` | `streamable-http` | Use `stdio` only if client and server are the same user. |
 
 Run `./install.sh --help` for the full list.
@@ -301,9 +346,11 @@ sudo systemctl daemon-reload && sudo systemctl restart quant-etl-mcp
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `SPRING_DIR` | yes | — | Root of the spring checkout. Used as the working directory for ETL subprocesses. |
-| `SPRING_PYTHON` | yes | — | spring's virtualenv interpreter. Must be the interpreter, not a wrapper script. |
-| `SPRING_LOG_DIR` | no | `$SPRING_DIR/log` | Where ETL logs live. Job records are stored in `mcp_jobs/` underneath it. |
+| `SPRING_DIR` | source checkout | — | Root of the spring checkout. Used as the working directory for ETL subprocesses. |
+| `SPRING_PYTHON` | source checkout | — | spring's virtualenv interpreter. Must be the interpreter, not a wrapper script. |
+| `SPRING_BIN_DIR` | installed package | — | Directory holding the `spring-*` commands (e.g. `/opt/spring/bin`). Setting it selects installed-package mode: commands are run directly instead of via `python -m`. Must not be combined with `SPRING_DIR`. |
+| `SPRING_HOME` | installed package | — | spring's runtime dir (contains `config/config.yaml`). Used as the ETL working directory and passed through to spring. Without it spring falls back to the running user's `~/.spring`. |
+| `SPRING_LOG_DIR` | no | `$SPRING_HOME/log`, or `$SPRING_DIR/log` when `SPRING_HOME` is unset | Where ETL logs live. Job records are stored in `mcp_jobs/` underneath it. |
 | `ETL_MCP_TRANSPORT` | no | `stdio` | `stdio`, `streamable-http`, or `sse`. |
 | `ETL_MCP_HOST` | no | `127.0.0.1` | Bind address. Non-loopback values print a warning. |
 | `ETL_MCP_PORT` | no | `8787` | Listening port. |
@@ -359,6 +406,28 @@ systemctl cat quant-etl-mcp
 
 Same cause as the first entry — an outdated `spring` checkout. Newer versions of
 this service catch it at startup with a clearer message.
+
+### `程序 'xxx' 的命令不存在` (installed package)
+
+*("The command for program 'xxx' does not exist")*
+
+`SPRING_BIN_DIR` points at the wrong directory, or the installed spring version
+lacks that command. Make sure it is the `bin/` of spring's installed environment,
+and upgrade the spring package.
+
+### `SPRING_HOME 下缺少配置文件` (installed package)
+
+*("Config file missing under SPRING_HOME")*
+
+The runtime dir was never initialised. As the service user, run
+`SPRING_HOME=<runtime dir> <bin dir>/spring-init` once, then edit `config/config.yaml`.
+
+### `SPRING_DIR 与 SPRING_BIN_DIR 只能设置一个`
+
+*("Set only one of SPRING_DIR and SPRING_BIN_DIR")*
+
+The unit sets variables for both deployment modes. Remove the pair that does not
+match how spring is deployed.
 
 ### `Address already in use`
 

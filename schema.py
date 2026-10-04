@@ -4,6 +4,8 @@
 #   2026-08-19  Claude  新增分片枚举、可重试状态集与 check_daily 的 JSON 契约
 #   2026-09-12  Claude  跟进 spring：注册 fill_turnover(spring 于 2026-09-10 纳入契约)，
 #                       并入 FILL_TARGETS 末位
+#   2026-10-04  Claude  跟进 spring 安装包部署：新增 SPRING_BIN_DIR / SPRING_HOME 模式，
+#                       直接调用 spring-* 命令；源码模式行为不变
 """与 spring 的跨仓契约(single source of truth)。
 
 本服务对 ETL 的内部逻辑「零知识」(ADR-5)，只需要三件事：
@@ -147,8 +149,12 @@ def _env(name: str) -> str:
     return os.environ.get(name, "").strip()
 
 
+# spring 有两种部署方式，本服务按 SPRING_BIN_DIR 是否设置区分：
+#   源码部署   SPRING_DIR + SPRING_PYTHON   `python -m etl.xxx`，cwd = SPRING_DIR
+#   安装包部署 SPRING_BIN_DIR + SPRING_HOME `$SPRING_BIN_DIR/spring-xxx`，cwd = SPRING_HOME
+
 def spring_dir() -> Path:
-    """spring 项目根目录；子进程以此为 cwd，`python -m` 会自动把它放进 sys.path[0]。"""
+    """spring 项目根目录(源码部署)；子进程以此为 cwd，`python -m` 会自动把它放进 sys.path[0]。"""
     value = _env("SPRING_DIR")
     if not value:
         raise RuntimeError("环境变量 SPRING_DIR 未设置：请指定 spring 项目根目录的绝对路径。")
@@ -168,10 +174,68 @@ def spring_python() -> Path:
     return Path(value)
 
 
+def spring_bin_dir() -> Path | None:
+    """spring 安装环境的 bin 目录(安装包部署)；未设置表示源码部署。
+
+    用绝对目录而不依赖 PATH：systemd 下的 PATH 与登录 shell 不同，
+    且「实际执行哪个程序」不应交给环境变量去决定。
+    """
+    value = _env("SPRING_BIN_DIR")
+    return Path(value) if value else None
+
+
+def spring_home() -> Path | None:
+    """spring 的运行目录(config/ log/ csv/ download/)；未设置时返回 None。"""
+    value = _env("SPRING_HOME")
+    return Path(value) if value else None
+
+
+def command_name(module: str) -> str:
+    """模块对应的 spring 命令名：etl.import_daily -> spring-import-daily。
+
+    约定来自 spring pyproject.toml 的 [project.scripts]。命令入口与 `python -m`
+    等价——被调用的模块 `__main__` 都只有 `sys.exit(main())`。
+    """
+    return "spring-" + module.rsplit(".", 1)[-1].replace("_", "-")
+
+
+def spring_command(module: str) -> Path:
+    """安装包部署下模块对应命令的绝对路径(Windows 上 pip 生成的是 .exe)。"""
+    bin_dir = spring_bin_dir()
+    if bin_dir is None:
+        raise RuntimeError("环境变量 SPRING_BIN_DIR 未设置：请指定 spring 安装环境 bin 目录的绝对路径。")
+    suffix = ".exe" if os.name == "nt" else ""
+    return bin_dir / (command_name(module) + suffix)
+
+
+def spring_workdir() -> Path:
+    """ETL 子进程的 cwd。
+
+    源码部署是 SPRING_DIR(`python -m` 靠它找到 spring)；安装包部署是 SPRING_HOME。
+    安装包部署必须显式设 SPRING_HOME：否则 spring 会回落到**运行用户**的 ~/.spring，
+    换个用户运行就悄悄读写另一套配置。
+    """
+    if spring_bin_dir() is None:
+        return spring_dir()
+    home = spring_home()
+    if home is None:
+        raise RuntimeError(
+            "安装包部署(已设置 SPRING_BIN_DIR)必须同时设置 SPRING_HOME：请指定 spring 运行目录"
+            "(含 config/config.yaml)的绝对路径。")
+    return home
+
+
 def spring_log_dir() -> Path:
-    """ETL 日志目录，默认 $SPRING_DIR/log。"""
+    """ETL 日志目录：SPRING_LOG_DIR > $SPRING_HOME/log > $SPRING_DIR/log。
+
+    与 spring 自身的日志位置一致(spring 把日志写在运行目录下)，
+    否则日志类 Tool 会去一个 spring 从不写入的目录里找文件。
+    """
     value = _env("SPRING_LOG_DIR")
-    return Path(value) if value else spring_dir() / "log"
+    if value:
+        return Path(value)
+    home = spring_home()
+    return (home if home is not None else spring_dir()) / "log"
 
 
 def jobs_dir() -> Path:
@@ -191,6 +255,42 @@ def max_runtime_default() -> int:
 
 def validate_environment() -> None:
     """启动时校验环境，配置有误要立刻报错而不是等到第一次调用 Tool。"""
+    if spring_bin_dir() is None:
+        _validate_source_checkout()
+    else:
+        _validate_installed_package()
+
+
+def _validate_installed_package() -> None:
+    if _env("SPRING_DIR"):
+        raise RuntimeError(
+            "SPRING_DIR 与 SPRING_BIN_DIR 只能设置一个：前者用于源码部署，后者用于安装包部署。")
+
+    bin_dir = spring_bin_dir()
+    if not bin_dir.is_dir():
+        raise RuntimeError(f"SPRING_BIN_DIR 不是目录或不存在: {bin_dir}")
+
+    home = spring_workdir()
+    if not home.is_dir():
+        raise RuntimeError(f"SPRING_HOME 不是目录或不存在: {home}")
+    config = home / "config" / "config.yaml"
+    if not config.is_file():
+        raise RuntimeError(
+            f"SPRING_HOME 下缺少配置文件: {config}；首次部署需先运行 spring-init 并按本机修改配置")
+
+    entries = [(f"程序 '{program}'", module) for program, module in PROGRAMS.items()]
+    entries += [("参数自省出口", DESCRIBE_MODULE), ("数据完整性检查工具", CHECK_MODULE)]
+    for label, module in entries:
+        command = spring_command(module)
+        if not command.is_file():
+            raise RuntimeError(
+                f"{label} 的命令不存在: {command}；确认 SPRING_BIN_DIR 指向 spring 安装环境的 "
+                f"bin 目录，且安装的 spring 版本包含该命令")
+        if not os.access(command, os.X_OK):
+            raise RuntimeError(f"{label} 的命令不可执行: {command}")
+
+
+def _validate_source_checkout() -> None:
     root = spring_dir()
     if not root.is_dir():
         raise RuntimeError(f"SPRING_DIR 不是目录或不存在: {root}")

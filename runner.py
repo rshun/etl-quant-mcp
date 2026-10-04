@@ -5,6 +5,7 @@
 #                       在 Python < 3.14 上导致同类注解求值失败
 #   2026-08-21  Claude  修完竞态的另一半：_monitor 不再直接发布终态，
 #                       否则「正在终止」的那一秒会被外部当作任务已结束
+#   2026-10-04  Claude  子进程 cwd 改用 schema.spring_workdir()，支持 spring 安装包部署
 """ETL 子进程执行器。
 
 设计要点（对应文档 ADR-2/3/6 与第五节）：
@@ -329,7 +330,7 @@ class Runner:
         try:
             proc = subprocess.Popen(
                 job.argv,
-                cwd=str(self._cwd or schema.spring_dir()),
+                cwd=str(self._cwd or schema.spring_workdir()),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

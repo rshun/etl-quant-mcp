@@ -8,6 +8,8 @@
 #   2026-09-13  Claude  spring 移除 --densify，同步撤掉 etl_adjust 的 densify 形参
 #   2026-09-17  Claude  spring 把 -p 改为按股票导出 CSV 且必须带 -c，同步改写
 #                       etl_import_daily 的干跑说明（原文会诱导模型漏传 codes）
+#   2026-10-04  Claude  check_data_gaps 的子进程 cwd 改用 schema.spring_workdir()，
+#                       支持 spring 安装包部署
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -686,7 +688,7 @@ def check_data_gaps(
     try:
         proc = subprocess.run(
             argv,
-            cwd=str(schema.spring_dir()),
+            cwd=str(schema.spring_workdir()),
             capture_output=True, text=True,
             timeout=timeout_seconds,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},

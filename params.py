@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：自省 spring 的 argparse 定义并据此构造/校验 argv
 #   2026-08-19  Claude  新增 split_range：按自然月/年分片，供断点续跑
+#   2026-10-04  Claude  安装包部署时直接调用 spring-* 命令(_command_prefix)，cwd 改用 spring_workdir
 """参数自省与 argv 构造。
 
 参数 schema 不写死在本仓库，而是运行时调用 spring 的 `tools.describe_cli` 取回(ADR-4)：
@@ -56,12 +57,11 @@ def fetch_program_schema(program: str, *, refresh: bool = False,
     if not refresh and program in _SCHEMA_CACHE:
         return _SCHEMA_CACHE[program]
 
-    interpreter = str(python) if python else str(schema.spring_python())
-    cmd = [interpreter, "-m", schema.DESCRIBE_MODULE, program]
+    cmd = [*_command_prefix(schema.DESCRIBE_MODULE, python), program]
     try:
         proc = subprocess.run(
             cmd,
-            cwd=str(schema.spring_dir()),
+            cwd=str(schema.spring_workdir()),
             capture_output=True,
             text=True,
             timeout=DESCRIBE_TIMEOUT,
@@ -89,6 +89,20 @@ def fetch_program_schema(program: str, *, refresh: bool = False,
 
     _SCHEMA_CACHE[program] = payload
     return payload
+
+
+def _command_prefix(module: str, python: str | Path | None, *,
+                    unbuffered: bool = False) -> list[str]:
+    """启动 spring 模块的命令前缀。
+
+    显式传入 python(测试、install.sh 冒烟)或源码部署：[解释器, (-u,) -m, 模块]。
+    安装包部署(设了 SPRING_BIN_DIR)：[spring-* 命令]。命令的 shebang 已指向安装环境的
+    解释器；没有 `-u`，行级实时输出由调用方设置的 PYTHONUNBUFFERED=1 保证。
+    """
+    if python is None and schema.spring_bin_dir() is not None:
+        return [str(schema.spring_command(module))]
+    interpreter = str(python) if python else str(schema.spring_python())
+    return [interpreter, "-u", "-m", module] if unbuffered else [interpreter, "-m", module]
 
 
 def require_known_program(program: str) -> str:
@@ -160,7 +174,8 @@ def build_argv(program: str, params: dict[str, Any] | None = None, *,
 
     Returns
     -------
-    完整 argv，形如 [python, "-u", "-m", "etl.import_daily", "-b", "20260817", ...]。
+    完整 argv，形如 [python, "-u", "-m", "etl.import_daily", "-b", "20260817", ...]；
+    安装包部署时形如 ["/opt/spring/bin/spring-import-daily", "-b", "20260817", ...]。
     `-u` 与调用方设置的 PYTHONUNBUFFERED 共同保证行级实时输出——
     少了它，pipe 的块缓冲会让正常运行被误判为卡死(文档 5.3)。
     """
@@ -190,8 +205,7 @@ def build_argv(program: str, params: dict[str, Any] | None = None, *,
             continue
         rendered.extend(_render_argument(dest, value, spec))
 
-    interpreter = str(python) if python else str(schema.spring_python())
-    return [interpreter, "-u", "-m", module, *rendered]
+    return [*_command_prefix(module, python, unbuffered=True), *rendered]
 
 
 def _validate_date_range(params: dict[str, Any], *, allow_long_span: bool) -> None:
@@ -346,9 +360,8 @@ def build_check_argv(values: dict[str, Any] | None = None, *,
     if limit is not None:
         argv += ["--json-max-detail", str(int(limit))]
 
-    interpreter = str(python) if python else str(schema.spring_python())
     # --json 恒定加上：本服务只消费机器可读输出
-    return [interpreter, "-m", schema.CHECK_MODULE, *argv, "--json"]
+    return [*_command_prefix(schema.CHECK_MODULE, python), *argv, "--json"]
 
 
 def _month_end(moment: datetime) -> datetime:
