@@ -30,15 +30,24 @@ User=rshun
 Group=rshun
 WorkingDirectory=/home/rshun/src/etl-quant-mcp
 ExecStart=/home/rshun/src/etl-quant-mcp/.venv/bin/python /home/rshun/src/etl-quant-mcp/server.py
+# 本服务按安装包部署(从 GitHub Release 下载 wheel 装进 /opt/etl-quant-mcp)时改为：
+# WorkingDirectory=/opt/etl-quant-mcp
+# ExecStart=/opt/etl-quant-mcp/bin/etl-quant-mcp
 # ↑↑↑ 按实际情况修改这四行 ↑↑↑
 
+# spring 部署方式二选一（不能同时设置）：
+# ① 源码部署：spring 检出目录 + 其虚拟环境的解释器
 Environment=SPRING_DIR=/home/rshun/src/spring
 Environment=SPRING_PYTHON=/home/rshun/src/venv_stock/bin/python3
+# ② 安装包部署：spring-* 命令所在目录 + spring 运行目录（含 config/config.yaml）
+# Environment=SPRING_BIN_DIR=/opt/spring/bin
+# Environment=SPRING_HOME=/srv/spring
+
 Environment=ETL_MCP_TRANSPORT=streamable-http
 Environment=ETL_MCP_HOST=127.0.0.1
 Environment=ETL_MCP_PORT=8787
-# 可选：任务元数据与日志目录，默认 $SPRING_DIR/log
-# Environment=SPRING_LOG_DIR=/home/rshun/src/spring/log
+# 可选：任务元数据与日志目录，默认 $SPRING_HOME/log（安装包）或 $SPRING_DIR/log（源码）
+# Environment=SPRING_LOG_DIR=/srv/spring/log
 
 Restart=on-failure
 RestartSec=5

@@ -46,15 +46,31 @@ ETL 调度 MCP 服务（服务名 `quant-etl`）。把 [spring](https://github.c
 python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ```
 
+### 安装包部署
+
+推送 `vX.Y.Z` 标签后，GitHub Actions 会跑三平台测试、构建 wheel，并发布到
+[Releases](https://github.com/rshun/etl-quant-mcp/releases)。标签必须与 `pyproject.toml` 的版本号一致。
+
+本服务以顶层模块安装（`server`、`schema` 等名字很通用），**必须装进独立 venv**：
+
+```bash
+python3 -m venv /opt/etl-quant-mcp
+/opt/etl-quant-mcp/bin/pip install https://github.com/rshun/etl-quant-mcp/releases/download/v0.1.0/etl_quant_mcp-0.1.0-py3-none-any.whl
+```
+
+systemd unit 中改为 `ExecStart=/opt/etl-quant-mcp/bin/etl-quant-mcp`，其余环境变量不变。
+
 ## 配置
 
 复制 `.mcp.json.example` 为 `.mcp.json` 并填入实际路径（`.mcp*` 已被 gitignore，各机器本地维护）：
 
 | 环境变量 | 必填 | 说明 |
 |---|---|---|
-| `SPRING_DIR` | 是 | spring 项目根目录，用作子进程的 cwd |
-| `SPRING_PYTHON` | 是 | spring 虚拟环境的解释器。**直接指向 venv 的 python，不要指向包装脚本** |
-| `SPRING_LOG_DIR` | 否 | 默认 `$SPRING_DIR/log` |
+| `SPRING_DIR` | 源码部署必填 | spring 项目根目录，用作子进程的 cwd |
+| `SPRING_PYTHON` | 源码部署必填 | spring 虚拟环境的解释器。**直接指向 venv 的 python，不要指向包装脚本** |
+| `SPRING_BIN_DIR` | 安装包部署必填 | `spring-*` 命令所在目录（如 `/opt/spring/bin`）。设了即直接调用命令，不经 `python -m`；不能与 `SPRING_DIR` 同时设置 |
+| `SPRING_HOME` | 安装包部署必填 | spring 运行目录（含 `config/config.yaml`），用作子进程的 cwd 并原样传给 spring |
+| `SPRING_LOG_DIR` | 否 | 默认 `$SPRING_HOME/log`，未设 `SPRING_HOME` 时为 `$SPRING_DIR/log` |
 | `MAX_RUNTIME_DEFAULT` | 否 | 任务硬超时上限，默认 7200 秒 |
 | `STALL_TIMEOUT_DEFAULT` | 否 | 留空则按日期跨度自动分档（≤7 天用 90 秒，更长用 600 秒） |
 
@@ -64,7 +80,8 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 
 配置有误时服务**启动即报错**，不会拖到第一次调用 Tool——包括 `SPRING_DIR` 指向的检出
 是否真的包含 7 个 ETL 模块、`tools/describe_cli.py` 与 `tools/check_daily.py`
-（分支过旧是个真实会踩的坑）。
+（分支过旧是个真实会踩的坑）；安装包部署时则检查 9 个 `spring-*` 命令都在、
+`$SPRING_HOME/config/config.yaml` 存在。
 
 ## 传输方式：stdio 还是 HTTP
 

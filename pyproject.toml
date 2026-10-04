@@ -19,10 +19,11 @@ dependencies = [
 ]
 
 # 安装后提供命令行入口 `etl-quant-mcp`，等价于 `python server.py`
-# 安装后提供命令行入口 `etl-quant-mcp`，等价于 `python server.py`
 [project.scripts]
 etl-quant-mcp = "server:main"
 
+# 以顶层模块安装，模块名很通用(server / schema / ...)：
+# 必须装进独立 venv(如 /opt/etl-quant-mcp)，不要装进系统或共用的 Python 环境
 [tool.setuptools]
 py-modules = ["server", "schema", "params", "runner", "logs"]
 
@@ -30,5 +31,5 @@ py-modules = ["server", "schema", "params", "runner", "logs"]
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
-    "integration: 需要真实 spring 环境(SPRING_DIR/SPRING_PYTHON)，用 -m \"not integration\" 跳过",
+    "integration: 需要真实 spring 环境(SPRING_DIR/SPRING_PYTHON 或 SPRING_BIN_DIR/SPRING_HOME)，用 -m \"not integration\" 跳过",
 ]
