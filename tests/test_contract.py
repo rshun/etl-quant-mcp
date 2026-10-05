@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：以固化快照断言「我按契约调用 spring」
 #   2026-09-12  Claude  跟进 spring：快照补 fill_turnover，adjust 参数面更新
+#   2026-10-04  Claude  源码部署的检出目录改由 SPRING_HOME 指定(SPRING_DIR 已不再使用)
 """跨仓契约测试——本仓库这一半。
 
 文档第七节把契约测试拆成两份，两边都不需要对方在场：
@@ -286,11 +287,15 @@ def test_validate_environment_checks_introspection_entrypoint(tmp_path, monkeypa
         path = root / (module.replace(".", "/") + ".py")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
+    (root / "config").mkdir()
+    (root / "config" / "config.yaml").write_text("", encoding="utf-8")
     interpreter = tmp_path / "python"
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     interpreter.chmod(0o755)
 
-    monkeypatch.setenv("SPRING_DIR", str(root))
+    monkeypatch.delenv("SPRING_BIN_DIR", raising=False)
+    monkeypatch.delenv("SPRING_DIR", raising=False)
+    monkeypatch.setenv("SPRING_HOME", str(root))
     monkeypatch.setenv("SPRING_PYTHON", str(interpreter))
 
     with pytest.raises(RuntimeError, match="describe_cli"):

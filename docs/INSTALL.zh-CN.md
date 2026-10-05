@@ -94,8 +94,8 @@ spring 有两种部署方式，本服务都支持，按你的实际情况二选�
 
 | spring 部署方式 | 看哪几节 | 本服务用的环境变量 |
 |---|---|---|
-| 源码检出 | 4.1、4.2、4.3、4.4 | `SPRING_DIR` + `SPRING_PYTHON` |
-| 安装包（wheel） | 4.3、4.4、4.5 | `SPRING_BIN_DIR` + `SPRING_HOME` |
+| 安装包（wheel） | 4.3、4.4、4.5 | `SPRING_HOME`（运行目录）+ `SPRING_BIN_DIR` |
+| 源码检出 | 4.1、4.2、4.3、4.4 | `SPRING_HOME`（填检出目录）+ `SPRING_PYTHON` |
 
 ### 4.1 一份可用的 spring 检出
 
@@ -172,19 +172,19 @@ head -1 /opt/spring/bin/spring-import-daily
 ```bash
 cd /home/rshun/src/etl-quant-mcp
 ./install.sh \
-    --spring-dir    /home/rshun/src/spring \
-    --spring-python /home/rshun/src/venv_stock/bin/python3
+    --spring-home    /srv/spring \
+    --spring-bin-dir /opt/spring/bin
 ```
 
-spring 是安装包部署时，换成：
+spring 是源码检出时，`--spring-home` 填检出目录，并把 `--spring-bin-dir` 换成解释器：
 
 ```bash
 ./install.sh \
-    --spring-bin-dir /opt/spring/bin \
-    --spring-home    /srv/spring
+    --spring-home   /home/rshun/src/spring \
+    --spring-python /home/rshun/src/venv_stock/bin/python3
 ```
 
-两组参数不能混用。
+`--spring-bin-dir` 与 `--spring-python` 只能给一个。旧参数 `--spring-dir` 已不再支持。
 
 脚本会做四件事：
 
@@ -200,7 +200,7 @@ spring 是安装包部署时，换成：
 只想校验环境、不创建任何东西：
 
 ```bash
-./install.sh --check --spring-dir ... --spring-python ...
+./install.sh --check --spring-home ... --spring-bin-dir ...
 ```
 
 ### 5.2 常用选项
@@ -339,11 +339,10 @@ sudo systemctl daemon-reload && sudo systemctl restart quant-etl-mcp
 
 | 变量 | 必填 | 默认值 | 含义 |
 |---|---|---|---|
-| `SPRING_DIR` | 源码部署必填 | — | spring 检出的根目录，用作 ETL 子进程的工作目录。 |
-| `SPRING_PYTHON` | 源码部署必填 | — | spring 虚拟环境的解释器。必须是解释器本身，不能是包装脚本。 |
-| `SPRING_BIN_DIR` | 安装包部署必填 | — | `spring-*` 命令所在目录（如 `/opt/spring/bin`）。设了它就按安装包部署运行，直接调用命令，不再经 `python -m`。不能与 `SPRING_DIR` 同时设置。 |
-| `SPRING_HOME` | 安装包部署必填 | — | spring 运行目录（含 `config/config.yaml`），用作 ETL 子进程的工作目录，并原样传给 spring。不设的话 spring 会回落到运行用户的 `~/.spring`。 |
-| `SPRING_LOG_DIR` | 否 | `$SPRING_HOME/log`，未设 `SPRING_HOME` 时为 `$SPRING_DIR/log` | ETL 日志所在目录。任务记录存在其下的 `mcp_jobs/`。 |
+| `SPRING_HOME` | 是 | — | spring 运行目录（含 `config/config.yaml`），用作 ETL 子进程的工作目录，并原样传给 spring。源码部署填 spring 检出目录。 |
+| `SPRING_BIN_DIR` | 与 `SPRING_PYTHON` 二选一 | — | 安装包部署：`spring-*` 命令所在目录（如 `/opt/spring/bin`），直接调用命令，不经 `python -m`。 |
+| `SPRING_PYTHON` | 与 `SPRING_BIN_DIR` 二选一 | — | 源码部署：spring 虚拟环境的解释器。必须是解释器本身，不能是包装脚本。 |
+| `SPRING_LOG_DIR` | 否 | `$SPRING_HOME/log` | ETL 日志所在目录。任务记录存在其下的 `mcp_jobs/`。 |
 | `ETL_MCP_TRANSPORT` | 否 | `stdio` | `stdio` / `streamable-http` / `sse`。 |
 | `ETL_MCP_HOST` | 否 | `127.0.0.1` | 绑定地址。非回环地址会打印告警。 |
 | `ETL_MCP_PORT` | 否 | `8787` | 监听端口。 |
@@ -376,7 +375,7 @@ git -C /home/rshun/src/spring status
 git -C /home/rshun/src/spring pull
 ```
 
-### `环境变量 SPRING_DIR 未设置` / `SPRING_PYTHON 不存在`
+### `环境变量 SPRING_HOME 未设置` / `SPRING_PYTHON 不存在`
 
 systemd unit 缺失，或者 `Environment=` 那几行写错了。检查：
 
@@ -393,14 +392,20 @@ systemctl cat quant-etl-mcp
 `SPRING_BIN_DIR` 指错了目录，或者装的 spring 版本还没有这个命令。确认
 `SPRING_BIN_DIR` 是 spring 安装环境的 `bin/`，并升级 spring 安装包。
 
-### `SPRING_HOME 下缺少配置文件`（安装包部署）
+### `SPRING_HOME 下缺少配置文件`
 
-运行目录还没初始化：以服务用户身份运行一次 `SPRING_HOME=<运行目录> <bin 目录>/spring-init`，
-再按本机修改 `config/config.yaml`。
+安装包部署：运行目录还没初始化，以服务用户身份运行一次
+`SPRING_HOME=<运行目录> <bin 目录>/spring-init`，再按本机修改 `config/config.yaml`。
+源码部署：`SPRING_HOME` 没指向 spring 检出目录。
 
-### `SPRING_DIR 与 SPRING_BIN_DIR 只能设置一个`
+### `SPRING_BIN_DIR 与 SPRING_PYTHON 必须且只能设置一个`
 
-unit 里同时写了两种部署方式的变量。按 spring 的实际部署方式删掉另一组。
+unit 里两个都写了，或者都没写。安装包部署留 `SPRING_BIN_DIR`，源码部署留 `SPRING_PYTHON`。
+
+### `SPRING_DIR 已不再使用，请删除`
+
+旧版本的配置残留。删掉 `SPRING_DIR` 那一行，改设 `SPRING_HOME`：源码部署填原来
+`SPRING_DIR` 的值（spring 检出目录），安装包部署填 spring 运行目录。
 
 ### `Address already in use`
 

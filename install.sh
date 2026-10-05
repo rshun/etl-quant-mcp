@@ -9,8 +9,8 @@
 # It deliberately does NOT run any command that needs root. The final three
 # `sudo` commands are printed for you to review and run yourself.
 #
-# Usage:  ./install.sh --spring-dir DIR --spring-python PATH [options]   (source checkout)
-#         ./install.sh --spring-bin-dir DIR --spring-home DIR [options]  (installed package)
+# Usage:  ./install.sh --spring-home DIR --spring-bin-dir DIR [options]  (installed package)
+#         ./install.sh --spring-home DIR --spring-python PATH [options]  (source checkout)
 # Help:   ./install.sh --help
 #
 set -euo pipefail
@@ -21,11 +21,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 INSTALL_DIR="$SCRIPT_DIR"
 VENV_DIR=""                      # defaults to $INSTALL_DIR/.venv
-SPRING_DIR=""
-SPRING_PYTHON=""
+SPRING_HOME=""                   # spring runtime dir (config/ log/ ...); the checkout for source
 SPRING_BIN_DIR=""                # installed package: dir holding the spring-* commands
-SPRING_HOME=""                   # installed package: spring runtime dir (config/ log/ ...)
-SPRING_LOG_DIR=""                # optional; defaults to <spring-home>/log or <spring-dir>/log
+SPRING_PYTHON=""                 # source checkout: spring's virtualenv interpreter
+SPRING_LOG_DIR=""                # optional; defaults to <spring-home>/log
 HOST="127.0.0.1"
 PORT="16000"
 TRANSPORT="streamable-http"
@@ -54,16 +53,15 @@ usage() {
     cat <<'USAGE'
 quant-etl MCP server installer
 
-REQUIRED - pick ONE pair, matching how spring is deployed
+REQUIRED
+  --spring-home DIR       spring runtime dir (SPRING_HOME) containing config/config.yaml.
+                          For a source checkout, this is the checkout root.
 
-  Source checkout:
-  --spring-dir DIR        Root of the spring ETL checkout (contains etl/ and tools/)
-  --spring-python PATH    Python interpreter of spring's virtualenv.
+  plus ONE of, matching how spring is deployed:
+  --spring-bin-dir DIR    Installed package: directory holding the spring-* commands,
+                          e.g. /opt/spring/bin
+  --spring-python PATH    Source checkout: Python interpreter of spring's virtualenv.
                           Point at the interpreter itself, NOT a wrapper script.
-
-  Installed package (wheel):
-  --spring-bin-dir DIR    Directory holding the spring-* commands, e.g. /opt/spring/bin
-  --spring-home DIR       spring runtime dir (SPRING_HOME) containing config/config.yaml
 
 OPTIONAL
   --install-dir DIR       Where this repo lives            (default: this script's directory)
@@ -74,7 +72,7 @@ OPTIONAL
   --service-name NAME     systemd unit name                (default: quant-etl-mcp)
   --service-user USER     User the service runs as         (default: current user)
   --service-group GROUP   Group the service runs as        (default: current user's group)
-  --log-dir DIR           ETL log directory                (default: <spring-home>/log or <spring-dir>/log)
+  --log-dir DIR           ETL log directory                (default: <spring-home>/log)
   --max-runtime SECONDS   Hard timeout per job             (default: 7200)
   --stall-timeout SECONDS Silence before a job is 'stalled'(default: auto by date span)
   --python PATH           Python used to build the venv    (default: python3)
@@ -82,16 +80,16 @@ OPTIONAL
   -h, --help              Show this message
 
 EXAMPLES
-  # source checkout
-  ./install.sh \
-      --spring-dir /home/rshun/src/spring \
-      --spring-python /home/rshun/src/venv_stock/bin/python3 \
-      --port 8787
-
   # installed package
   ./install.sh \
-      --spring-bin-dir /opt/spring/bin \
       --spring-home /srv/spring \
+      --spring-bin-dir /opt/spring/bin \
+      --port 8787
+
+  # source checkout
+  ./install.sh \
+      --spring-home /home/rshun/src/spring \
+      --spring-python /home/rshun/src/venv_stock/bin/python3 \
       --port 8787
 
 The service must run as the user that owns the ETL data. See docs/INSTALL.md.
@@ -104,7 +102,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --install-dir)    INSTALL_DIR="$2"; shift 2 ;;
         --venv)           VENV_DIR="$2"; shift 2 ;;
-        --spring-dir)     SPRING_DIR="$2"; shift 2 ;;
+        --spring-dir)     die "--spring-dir is no longer supported. Use --spring-home instead
+       (for a source checkout, pass the checkout root)." ;;
         --spring-python)  SPRING_PYTHON="$2"; shift 2 ;;
         --spring-bin-dir) SPRING_BIN_DIR="$2"; shift 2 ;;
         --spring-home)    SPRING_HOME="$2"; shift 2 ;;
@@ -124,19 +123,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# The two deployment modes use different variables; mixing them would leave the
-# server's working directory and launch method ambiguous.
-if [ -n "$SPRING_BIN_DIR$SPRING_HOME" ]; then
+[ -n "$SPRING_HOME" ] || die "--spring-home is required. Try --help."
+# Exactly one launcher: setting both would leave the launch method ambiguous.
+if [ -n "$SPRING_BIN_DIR" ] && [ -n "$SPRING_PYTHON" ]; then
+    die "Use either --spring-bin-dir (installed package) or --spring-python (source checkout), not both."
+elif [ -n "$SPRING_BIN_DIR" ]; then
     MODE="installed"
-    [ -z "$SPRING_DIR$SPRING_PYTHON" ] \
-        || die "Use either --spring-dir/--spring-python (source checkout)
-       or --spring-bin-dir/--spring-home (installed package), not both."
-    [ -n "$SPRING_BIN_DIR" ] || die "--spring-bin-dir is required with --spring-home. Try --help."
-    [ -n "$SPRING_HOME" ]    || die "--spring-home is required with --spring-bin-dir. Try --help."
-else
+elif [ -n "$SPRING_PYTHON" ]; then
     MODE="source"
-    [ -n "$SPRING_DIR" ]    || die "--spring-dir is required. Try --help."
-    [ -n "$SPRING_PYTHON" ] || die "--spring-python is required. Try --help."
+else
+    die "One of --spring-bin-dir (installed package) or --spring-python (source checkout) is required.
+       Try --help."
 fi
 
 # Normalise to absolute paths so the systemd unit is unambiguous.
@@ -145,17 +142,13 @@ fi
 _INSTALL_DIR_IN="$INSTALL_DIR"
 INSTALL_DIR="$(cd "$_INSTALL_DIR_IN" 2>/dev/null && pwd)" \
     || die "--install-dir does not exist: $_INSTALL_DIR_IN"
-if [ "$MODE" = "source" ]; then
-    _SPRING_DIR_IN="$SPRING_DIR"
-    SPRING_DIR="$(cd "$_SPRING_DIR_IN" 2>/dev/null && pwd)" \
-        || die "--spring-dir does not exist or is not readable by $(id -un): $_SPRING_DIR_IN"
-else
+_SPRING_HOME_IN="$SPRING_HOME"
+SPRING_HOME="$(cd "$_SPRING_HOME_IN" 2>/dev/null && pwd)" \
+    || die "--spring-home does not exist or is not readable by $(id -un): $_SPRING_HOME_IN"
+if [ "$MODE" = "installed" ]; then
     _SPRING_BIN_DIR_IN="$SPRING_BIN_DIR"
-    _SPRING_HOME_IN="$SPRING_HOME"
     SPRING_BIN_DIR="$(cd "$_SPRING_BIN_DIR_IN" 2>/dev/null && pwd)" \
         || die "--spring-bin-dir does not exist or is not readable by $(id -un): $_SPRING_BIN_DIR_IN"
-    SPRING_HOME="$(cd "$_SPRING_HOME_IN" 2>/dev/null && pwd)" \
-        || die "--spring-home does not exist or is not readable by $(id -un): $_SPRING_HOME_IN"
 fi
 [ -n "$VENV_DIR" ] || VENV_DIR="$INSTALL_DIR/.venv"
 
@@ -197,12 +190,13 @@ if [ "$MODE" = "source" ]; then
     for rel in etl/adjust.py etl/import_daily.py etl/fetch_index.py \
                etl/fill_volratio.py etl/update_limit.py etl/fill_shares.py \
                tools/describe_cli.py tools/check_daily.py; do
-        [ -f "$SPRING_DIR/$rel" ] || MISSING="$MISSING\n       - $rel"
+        [ -f "$SPRING_HOME/$rel" ] || MISSING="$MISSING\n       - $rel"
     done
-    [ -z "$MISSING" ] || die "The spring checkout at $SPRING_DIR is missing:$(printf "$MISSING")
+    [ -z "$MISSING" ] || die "The spring checkout at $SPRING_HOME is missing:$(printf "$MISSING")
 
-       This usually means the checkout is on an outdated branch.
-       Run 'git -C $SPRING_DIR status' and switch to the branch that has these files."
+       For a source checkout, --spring-home must be the checkout root.
+       If it is, the checkout is probably on an outdated branch:
+       run 'git -C $SPRING_HOME status' and switch to the branch that has these files."
     ok "spring checkout looks complete"
 
     [ -x "$SPRING_PYTHON" ] \
@@ -223,12 +217,18 @@ else
        Point --spring-bin-dir at the bin/ of the environment spring was installed into,
        and make sure the installed spring version provides these commands."
     ok "spring commands found in $SPRING_BIN_DIR"
-
-    [ -f "$SPRING_HOME/config/config.yaml" ] \
-        || die "No config/config.yaml under --spring-home: $SPRING_HOME
-       Run 'SPRING_HOME=$SPRING_HOME $SPRING_BIN_DIR/spring-init' once, then edit the config."
-    ok "spring runtime dir looks complete"
 fi
+
+if [ ! -f "$SPRING_HOME/config/config.yaml" ]; then
+    if [ "$MODE" = "installed" ]; then
+        die "No config/config.yaml under --spring-home: $SPRING_HOME
+       Run 'SPRING_HOME=$SPRING_HOME $SPRING_BIN_DIR/spring-init' once, then edit the config."
+    else
+        die "No config/config.yaml under --spring-home: $SPRING_HOME
+       For a source checkout, --spring-home must be the checkout root."
+    fi
+fi
+ok "spring runtime dir looks complete"
 
 case "$TRANSPORT" in
     stdio|streamable-http|sse) ok "Transport: $TRANSPORT" ;;
@@ -281,16 +281,11 @@ ok "Dependencies installed (only 'mcp'; the heavy work runs in spring's interpre
 
 step "Verifying the server can start"
 
-if [ "$MODE" = "source" ]; then
-    SMOKE_ENV=(
-        "SPRING_DIR=$SPRING_DIR"
-        "SPRING_PYTHON=$SPRING_PYTHON"
-    )
+SMOKE_ENV=("SPRING_HOME=$SPRING_HOME")
+if [ "$MODE" = "installed" ]; then
+    SMOKE_ENV+=("SPRING_BIN_DIR=$SPRING_BIN_DIR")
 else
-    SMOKE_ENV=(
-        "SPRING_BIN_DIR=$SPRING_BIN_DIR"
-        "SPRING_HOME=$SPRING_HOME"
-    )
+    SMOKE_ENV+=("SPRING_PYTHON=$SPRING_PYTHON")
 fi
 [ -n "$SPRING_LOG_DIR" ] && SMOKE_ENV+=("SPRING_LOG_DIR=$SPRING_LOG_DIR")
 
@@ -318,7 +313,7 @@ params.fetch_program_schema('import_daily')
 else
     if [ "$MODE" = "source" ]; then
         die "Could not introspect spring's CLI.
-       Try manually:  cd $SPRING_DIR && $SPRING_PYTHON -m tools.describe_cli --list"
+       Try manually:  cd $SPRING_HOME && $SPRING_PYTHON -m tools.describe_cli --list"
     else
         die "Could not introspect spring's CLI.
        Try manually:  SPRING_HOME=$SPRING_HOME $SPRING_BIN_DIR/spring-describe-cli --list"
@@ -353,12 +348,11 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/server.py
 
 UNIT
-    if [ "$MODE" = "source" ]; then
-        echo "Environment=SPRING_DIR=$SPRING_DIR"
-        echo "Environment=SPRING_PYTHON=$SPRING_PYTHON"
-    else
+    echo "Environment=SPRING_HOME=$SPRING_HOME"
+    if [ "$MODE" = "installed" ]; then
         echo "Environment=SPRING_BIN_DIR=$SPRING_BIN_DIR"
-        echo "Environment=SPRING_HOME=$SPRING_HOME"
+    else
+        echo "Environment=SPRING_PYTHON=$SPRING_PYTHON"
     fi
     cat <<UNIT
 Environment=ETL_MCP_TRANSPORT=$TRANSPORT

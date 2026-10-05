@@ -55,7 +55,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 
 ```bash
 python3 -m venv /opt/etl-quant-mcp
-/opt/etl-quant-mcp/bin/pip install https://github.com/rshun/etl-quant-mcp/releases/download/v0.1.0/etl_quant_mcp-0.1.0-py3-none-any.whl
+/opt/etl-quant-mcp/bin/pip install https://github.com/rshun/etl-quant-mcp/releases/download/v0.2.0/etl_quant_mcp-0.2.0-py3-none-any.whl
 ```
 
 systemd unit 中改为 `ExecStart=/opt/etl-quant-mcp/bin/etl-quant-mcp`，其余环境变量不变。
@@ -66,22 +66,22 @@ systemd unit 中改为 `ExecStart=/opt/etl-quant-mcp/bin/etl-quant-mcp`，其余
 
 | 环境变量 | 必填 | 说明 |
 |---|---|---|
-| `SPRING_DIR` | 源码部署必填 | spring 项目根目录，用作子进程的 cwd |
-| `SPRING_PYTHON` | 源码部署必填 | spring 虚拟环境的解释器。**直接指向 venv 的 python，不要指向包装脚本** |
-| `SPRING_BIN_DIR` | 安装包部署必填 | `spring-*` 命令所在目录（如 `/opt/spring/bin`）。设了即直接调用命令，不经 `python -m`；不能与 `SPRING_DIR` 同时设置 |
-| `SPRING_HOME` | 安装包部署必填 | spring 运行目录（含 `config/config.yaml`），用作子进程的 cwd 并原样传给 spring |
-| `SPRING_LOG_DIR` | 否 | 默认 `$SPRING_HOME/log`，未设 `SPRING_HOME` 时为 `$SPRING_DIR/log` |
+| `SPRING_HOME` | 是 | spring 运行目录（含 `config/config.yaml`），用作子进程的 cwd 并原样传给 spring。源码部署填 spring 检出目录 |
+| `SPRING_BIN_DIR` | 与 `SPRING_PYTHON` 二选一 | 安装包部署：`spring-*` 命令所在目录（如 `/opt/spring/bin`），直接调用命令，不经 `python -m` |
+| `SPRING_PYTHON` | 与 `SPRING_BIN_DIR` 二选一 | 源码部署：spring 虚拟环境的解释器。**直接指向 venv 的 python，不要指向包装脚本** |
+| `SPRING_LOG_DIR` | 否 | 默认 `$SPRING_HOME/log` |
 | `MAX_RUNTIME_DEFAULT` | 否 | 任务硬超时上限，默认 7200 秒 |
 | `STALL_TIMEOUT_DEFAULT` | 否 | 留空则按日期跨度自动分档（≤7 天用 90 秒，更长用 600 秒） |
 
+> `SPRING_DIR` 已不再使用，残留时服务会拒绝启动并提示改用 `SPRING_HOME`。
 **不要经过 `quant.sh` 之类的包装脚本**：它提供的「激活 venv」与「设 PYTHONPATH」两件事，
 本服务通过指定 venv 解释器 + `cwd` 已自动满足（`python -m` 会把 CWD 放进 `sys.path[0]`），
 多包一层 shell 只会多一层退出码传递风险。
 
-配置有误时服务**启动即报错**，不会拖到第一次调用 Tool——包括 `SPRING_DIR` 指向的检出
+配置有误时服务**启动即报错**，不会拖到第一次调用 Tool——包括 `$SPRING_HOME/config/config.yaml`
+是否存在；安装包部署检查 9 个 `spring-*` 命令都在，源码部署检查 `SPRING_HOME` 指向的检出
 是否真的包含 7 个 ETL 模块、`tools/describe_cli.py` 与 `tools/check_daily.py`
-（分支过旧是个真实会踩的坑）；安装包部署时则检查 9 个 `spring-*` 命令都在、
-`$SPRING_HOME/config/config.yaml` 存在。
+（分支过旧是个真实会踩的坑）。
 
 ## 传输方式：stdio 还是 HTTP
 
@@ -205,14 +205,14 @@ queued → running → ┬→ succeeded      exit 0
 ## 测试
 
 ```bash
-pytest -m "not integration"      # 296 项，不需要 spring 在场
+pytest -m "not integration"      # 不需要 spring 在场
 ```
 
 参数 schema 用固化快照，子进程用临时 python 小脚本。
 
 ```bash
-export SPRING_DIR=/path/to/spring
-export SPRING_PYTHON=/path/to/venv/bin/python
+export SPRING_HOME=/path/to/spring-home
+export SPRING_BIN_DIR=/path/to/spring-env/bin   # 源码部署改设 SPRING_PYTHON，SPRING_HOME 填检出目录
 pytest -m integration            # 17 项，需要真实 spring
 ```
 

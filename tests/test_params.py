@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：argv 构造与参数白名单的正反例
+#   2026-10-04  Claude  子进程 cwd 改为 SPRING_HOME，桩改打 schema.spring_home
 """params.py 的正反例。
 
 反例是重点：这一层是本服务唯一的输入闸门，放过一个非法值，
@@ -215,7 +216,7 @@ def test_fetch_schema_parses_json():
     """正例: 正常解析 describe_cli 的 JSON 输出"""
     payload = json.dumps(IMPORT_DAILY_SCHEMA, ensure_ascii=False)
     with patch.object(params.subprocess, "run", return_value=_fake_run(payload)), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         result = params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
     assert result["program"] == "import_daily"
     assert "begin" in result["arguments"]
@@ -225,7 +226,7 @@ def test_fetch_schema_is_cached():
     """正例: 第二次取用缓存，不再起子进程"""
     payload = json.dumps(IMPORT_DAILY_SCHEMA, ensure_ascii=False)
     with patch.object(params.subprocess, "run", return_value=_fake_run(payload)) as run, \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
         params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
     assert run.call_count == 1
@@ -235,7 +236,7 @@ def test_fetch_schema_refresh_bypasses_cache():
     """正例: refresh=True 强制重新自省"""
     payload = json.dumps(IMPORT_DAILY_SCHEMA, ensure_ascii=False)
     with patch.object(params.subprocess, "run", return_value=_fake_run(payload)) as run, \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
         params.fetch_program_schema("import_daily", python=FAKE_PYTHON, refresh=True)
     assert run.call_count == 2
@@ -245,7 +246,7 @@ def test_fetch_schema_never_uses_shell():
     """正例(安全): 必须以 argv 列表调用，且 shell=False"""
     payload = json.dumps(IMPORT_DAILY_SCHEMA, ensure_ascii=False)
     with patch.object(params.subprocess, "run", return_value=_fake_run(payload)) as run, \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
     cmd = run.call_args.args[0]
     assert isinstance(cmd, list)
@@ -257,7 +258,7 @@ def test_fetch_schema_nonzero_exit_raises():
     """反例: describe_cli 失败必须抛错，不得返回空 schema"""
     with patch.object(params.subprocess, "run",
                       return_value=_fake_run("", returncode=1, stderr="boom")), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         with pytest.raises(params.IntrospectionError, match="失败"):
             params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
 
@@ -265,7 +266,7 @@ def test_fetch_schema_nonzero_exit_raises():
 def test_fetch_schema_bad_json_raises():
     """反例: 输出不是 JSON"""
     with patch.object(params.subprocess, "run", return_value=_fake_run("not json")), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         with pytest.raises(params.IntrospectionError, match="不是合法 JSON"):
             params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
 
@@ -273,7 +274,7 @@ def test_fetch_schema_bad_json_raises():
 def test_fetch_schema_missing_arguments_key_raises():
     """反例: JSON 合法但结构不对"""
     with patch.object(params.subprocess, "run", return_value=_fake_run('{"program": "x"}')), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         with pytest.raises(params.IntrospectionError, match="缺少 arguments"):
             params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
 
@@ -282,7 +283,7 @@ def test_fetch_schema_timeout_raises():
     """反例: 自省本身卡住"""
     with patch.object(params.subprocess, "run",
                       side_effect=subprocess.TimeoutExpired("cmd", 60)), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"):
+         patch.object(schema, "spring_home", return_value="/fake/spring"):
         with pytest.raises(params.IntrospectionError, match="超时"):
             params.fetch_program_schema("import_daily", python=FAKE_PYTHON)
 

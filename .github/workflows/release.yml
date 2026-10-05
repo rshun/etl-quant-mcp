@@ -1,5 +1,6 @@
 # 修改记录:
 #   2026-10-04  Claude  新建: 三平台测试 + 构建 wheel + 安装冒烟测试; 推送 v* 标签时发布 Release
+#   2026-10-04  Claude  冒烟测试的报错断言跟随 SPRING_DIR 移除改为 SPRING_BIN_DIR
 #
 # 普通推送 / PR: 只跑 test + build, 不发布
 # 推送标签 vX.Y.Z: 额外校验标签与 pyproject.toml 版本号一致, 通过后创建 GitHub Release 并上传安装包
@@ -72,7 +73,7 @@ jobs:
           set -e
           cat err.txt
           test "$code" = 1
-          grep -q "SPRING_DIR" err.txt
+          grep -q "SPRING_BIN_DIR" err.txt
       - uses: actions/upload-artifact@v4
         with:
           name: dist

@@ -35,18 +35,18 @@ ExecStart=/home/rshun/src/etl-quant-mcp/.venv/bin/python /home/rshun/src/etl-qua
 # ExecStart=/opt/etl-quant-mcp/bin/etl-quant-mcp
 # ↑↑↑ 按实际情况修改这四行 ↑↑↑
 
-# spring 部署方式二选一（不能同时设置）：
-# ① 源码部署：spring 检出目录 + 其虚拟环境的解释器
-Environment=SPRING_DIR=/home/rshun/src/spring
-Environment=SPRING_PYTHON=/home/rshun/src/venv_stock/bin/python3
-# ② 安装包部署：spring-* 命令所在目录 + spring 运行目录（含 config/config.yaml）
-# Environment=SPRING_BIN_DIR=/opt/spring/bin
-# Environment=SPRING_HOME=/srv/spring
+# spring 运行目录（含 config/config.yaml），也是 ETL 子进程的工作目录
+Environment=SPRING_HOME=/srv/spring
+# spring 的启动方式二选一（不能同时设置）：
+# ① 安装包部署：spring-* 命令所在目录
+Environment=SPRING_BIN_DIR=/opt/spring/bin
+# ② 源码部署：spring 虚拟环境的解释器；此时 SPRING_HOME 填 spring 检出目录
+# Environment=SPRING_PYTHON=/home/rshun/src/venv_stock/bin/python3
 
 Environment=ETL_MCP_TRANSPORT=streamable-http
 Environment=ETL_MCP_HOST=127.0.0.1
 Environment=ETL_MCP_PORT=8787
-# 可选：任务元数据与日志目录，默认 $SPRING_HOME/log（安装包）或 $SPRING_DIR/log（源码）
+# 可选：任务元数据与日志目录，默认 $SPRING_HOME/log
 # Environment=SPRING_LOG_DIR=/srv/spring/log
 
 Restart=on-failure

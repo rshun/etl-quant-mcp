@@ -6,6 +6,8 @@
 #                       并入 FILL_TARGETS 末位
 #   2026-10-04  Claude  跟进 spring 安装包部署：新增 SPRING_BIN_DIR / SPRING_HOME 模式，
 #                       直接调用 spring-* 命令；源码模式行为不变
+#   2026-10-04  Claude  去掉 SPRING_DIR：cwd 统一为 SPRING_HOME(必填)，
+#                       启动方式由 SPRING_BIN_DIR / SPRING_PYTHON 二选一；残留 SPRING_DIR 报错
 """与 spring 的跨仓契约(single source of truth)。
 
 本服务对 ETL 的内部逻辑「零知识」(ADR-5)，只需要三件事：
@@ -149,20 +151,14 @@ def _env(name: str) -> str:
     return os.environ.get(name, "").strip()
 
 
-# spring 有两种部署方式，本服务按 SPRING_BIN_DIR 是否设置区分：
-#   源码部署   SPRING_DIR + SPRING_PYTHON   `python -m etl.xxx`，cwd = SPRING_DIR
-#   安装包部署 SPRING_BIN_DIR + SPRING_HOME `$SPRING_BIN_DIR/spring-xxx`，cwd = SPRING_HOME
-
-def spring_dir() -> Path:
-    """spring 项目根目录(源码部署)；子进程以此为 cwd，`python -m` 会自动把它放进 sys.path[0]。"""
-    value = _env("SPRING_DIR")
-    if not value:
-        raise RuntimeError("环境变量 SPRING_DIR 未设置：请指定 spring 项目根目录的绝对路径。")
-    return Path(value)
-
+# 子进程的 cwd 一律是 SPRING_HOME(spring 的运行目录)，启动方式按部署方式二选一：
+#   安装包部署 SPRING_HOME + SPRING_BIN_DIR   `$SPRING_BIN_DIR/spring-xxx`
+#   源码部署   SPRING_HOME + SPRING_PYTHON    `python -m etl.xxx`
+# 源码部署时 spring 的运行目录就是检出目录，SPRING_HOME 填检出目录即可，
+# `python -m` 靠 cwd(sys.path[0]) 找到 spring。SPRING_DIR 已不再使用。
 
 def spring_python() -> Path:
-    """spring 虚拟环境的解释器。
+    """spring 虚拟环境的解释器(源码部署)。
 
     直接指向 venv 解释器，不经过 quant.sh 之类的包装脚本——包装脚本提供的
     「激活 venv」与「设 PYTHONPATH」两件事，本服务通过指定解释器 + cwd 已自动满足，
@@ -170,7 +166,9 @@ def spring_python() -> Path:
     """
     value = _env("SPRING_PYTHON")
     if not value:
-        raise RuntimeError("环境变量 SPRING_PYTHON 未设置：请指定 spring 虚拟环境解释器的绝对路径。")
+        raise RuntimeError(
+            "环境变量 SPRING_PYTHON 未设置：源码部署请指定 spring 虚拟环境解释器的绝对路径；"
+            "安装包部署请改设 SPRING_BIN_DIR。")
     return Path(value)
 
 
@@ -184,10 +182,18 @@ def spring_bin_dir() -> Path | None:
     return Path(value) if value else None
 
 
-def spring_home() -> Path | None:
-    """spring 的运行目录(config/ log/ csv/ download/)；未设置时返回 None。"""
+def spring_home() -> Path:
+    """spring 的运行目录(config/ log/ csv/ download/)，也是 ETL 子进程的 cwd。
+
+    必须显式设置：不设的话 spring 安装包会回落到**运行用户**的 ~/.spring，
+    换个用户运行就悄悄读写另一套配置。
+    """
     value = _env("SPRING_HOME")
-    return Path(value) if value else None
+    if not value:
+        raise RuntimeError(
+            "环境变量 SPRING_HOME 未设置：请指定 spring 运行目录(含 config/config.yaml)的绝对路径；"
+            "源码部署填 spring 检出目录。")
+    return Path(value)
 
 
 def command_name(module: str) -> str:
@@ -208,34 +214,14 @@ def spring_command(module: str) -> Path:
     return bin_dir / (command_name(module) + suffix)
 
 
-def spring_workdir() -> Path:
-    """ETL 子进程的 cwd。
-
-    源码部署是 SPRING_DIR(`python -m` 靠它找到 spring)；安装包部署是 SPRING_HOME。
-    安装包部署必须显式设 SPRING_HOME：否则 spring 会回落到**运行用户**的 ~/.spring，
-    换个用户运行就悄悄读写另一套配置。
-    """
-    if spring_bin_dir() is None:
-        return spring_dir()
-    home = spring_home()
-    if home is None:
-        raise RuntimeError(
-            "安装包部署(已设置 SPRING_BIN_DIR)必须同时设置 SPRING_HOME：请指定 spring 运行目录"
-            "(含 config/config.yaml)的绝对路径。")
-    return home
-
-
 def spring_log_dir() -> Path:
-    """ETL 日志目录：SPRING_LOG_DIR > $SPRING_HOME/log > $SPRING_DIR/log。
+    """ETL 日志目录：SPRING_LOG_DIR > $SPRING_HOME/log。
 
     与 spring 自身的日志位置一致(spring 把日志写在运行目录下)，
     否则日志类 Tool 会去一个 spring 从不写入的目录里找文件。
     """
     value = _env("SPRING_LOG_DIR")
-    if value:
-        return Path(value)
-    home = spring_home()
-    return (home if home is not None else spring_dir()) / "log"
+    return Path(value) if value else spring_home() / "log"
 
 
 def jobs_dir() -> Path:
@@ -255,28 +241,37 @@ def max_runtime_default() -> int:
 
 def validate_environment() -> None:
     """启动时校验环境，配置有误要立刻报错而不是等到第一次调用 Tool。"""
-    if spring_bin_dir() is None:
-        _validate_source_checkout()
-    else:
-        _validate_installed_package()
-
-
-def _validate_installed_package() -> None:
+    # 旧配置残留时必须明确报错：静默忽略的话，改了 SPRING_DIR 却不生效，排查方向会被带偏
     if _env("SPRING_DIR"):
         raise RuntimeError(
-            "SPRING_DIR 与 SPRING_BIN_DIR 只能设置一个：前者用于源码部署，后者用于安装包部署。")
+            "SPRING_DIR 已不再使用，请删除：工作目录改由 SPRING_HOME 指定"
+            "(源码部署填 spring 检出目录，安装包部署填 spring 运行目录)。")
 
-    bin_dir = spring_bin_dir()
-    if not bin_dir.is_dir():
-        raise RuntimeError(f"SPRING_BIN_DIR 不是目录或不存在: {bin_dir}")
+    has_bin, has_python = bool(_env("SPRING_BIN_DIR")), bool(_env("SPRING_PYTHON"))
+    if has_bin == has_python:
+        raise RuntimeError(
+            "SPRING_BIN_DIR 与 SPRING_PYTHON 必须且只能设置一个："
+            "前者用于安装包部署，后者用于源码部署。")
 
-    home = spring_workdir()
+    home = spring_home()
     if not home.is_dir():
         raise RuntimeError(f"SPRING_HOME 不是目录或不存在: {home}")
     config = home / "config" / "config.yaml"
     if not config.is_file():
         raise RuntimeError(
-            f"SPRING_HOME 下缺少配置文件: {config}；首次部署需先运行 spring-init 并按本机修改配置")
+            f"SPRING_HOME 下缺少配置文件: {config}；安装包部署需先运行 spring-init 并按本机修改配置，"
+            f"源码部署请确认 SPRING_HOME 指向 spring 检出目录")
+
+    if has_bin:
+        _validate_installed_package()
+    else:
+        _validate_source_checkout(home)
+
+
+def _validate_installed_package() -> None:
+    bin_dir = spring_bin_dir()
+    if not bin_dir.is_dir():
+        raise RuntimeError(f"SPRING_BIN_DIR 不是目录或不存在: {bin_dir}")
 
     entries = [(f"程序 '{program}'", module) for program, module in PROGRAMS.items()]
     entries += [("参数自省出口", DESCRIBE_MODULE), ("数据完整性检查工具", CHECK_MODULE)]
@@ -290,11 +285,7 @@ def _validate_installed_package() -> None:
             raise RuntimeError(f"{label} 的命令不可执行: {command}")
 
 
-def _validate_source_checkout() -> None:
-    root = spring_dir()
-    if not root.is_dir():
-        raise RuntimeError(f"SPRING_DIR 不是目录或不存在: {root}")
-
+def _validate_source_checkout(root: Path) -> None:
     interpreter = spring_python()
     if not interpreter.is_file():
         raise RuntimeError(f"SPRING_PYTHON 不存在: {interpreter}")
@@ -315,5 +306,5 @@ def _validate_source_checkout() -> None:
         if not (root / relative).is_file():
             raise RuntimeError(
                 f"{label} '{module}' 的文件不存在: {root / relative}；"
-                f"确认 SPRING_DIR 指向的检出包含该文件（分支是否过旧？）"
+                f"确认 SPRING_HOME 指向的检出包含该文件（分支是否过旧？）"
             )

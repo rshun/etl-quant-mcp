@@ -1,6 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：Tool 注册、参数闸门与任务管理的正反例
 #   2026-09-12  Claude  跟进 spring：fill_turnover 并入 etl_fill_indicators
+#   2026-10-04  Claude  子进程 cwd 改为 SPRING_HOME，桩改打 schema.spring_home
 """server.py 的正反例。
 
 分两类测：
@@ -522,7 +523,7 @@ def test_check_data_gaps_reports_gaps(live_runner):
     import json as json_mod
     with patch.object(server.subprocess, "run",
                       return_value=_fake_proc(json_mod.dumps(_GAPS_PAYLOAD))), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         result = server.check_data_gaps(begin="20260817")
     assert result["ok"] is True
@@ -540,7 +541,7 @@ def test_check_data_gaps_complete(live_runner):
                "core": {**_GAPS_PAYLOAD["core"], "missing_total": 0}}
     with patch.object(server.subprocess, "run",
                       return_value=_fake_proc(json_mod.dumps(payload))), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         result = server.check_data_gaps(begin="20260817")
     assert result["ok"] is True
@@ -552,7 +553,7 @@ def test_check_data_gaps_never_uses_shell(live_runner):
     import json as json_mod
     with patch.object(server.subprocess, "run",
                       return_value=_fake_proc(json_mod.dumps(_GAPS_PAYLOAD))) as run, \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         server.check_data_gaps(begin="20260817")
     argv = run.call_args.args[0]
@@ -578,7 +579,7 @@ def test_check_data_gaps_surfaces_check_error(live_runner):
                "error": "参数校验失败，详见 stderr 日志"}
     with patch.object(server.subprocess, "run",
                       return_value=_fake_proc(json_mod.dumps(payload), returncode=2)), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         result = server.check_data_gaps(begin="20260822")
     assert result["ok"] is False
@@ -589,7 +590,7 @@ def test_check_data_gaps_handles_non_json_output(live_runner):
     """反例: 输出不是 JSON 时给出可诊断的信息，不抛裸异常"""
     with patch.object(server.subprocess, "run",
                       return_value=_fake_proc("Traceback...", returncode=1)), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         result = server.check_data_gaps(begin="20260817")
     assert result["ok"] is False
@@ -612,7 +613,7 @@ def test_check_data_gaps_empty_output_hints_db_lock(live_runner):
 
     with patch.object(server.subprocess, "run",
                       return_value=_fake_proc("", returncode=1, stderr="Conflicting lock")), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         result = server.check_data_gaps(begin="20260817")
     assert result["ok"] is False
@@ -625,7 +626,7 @@ def test_check_data_gaps_timeout(live_runner):
     import subprocess as sp
     with patch.object(server.subprocess, "run",
                       side_effect=sp.TimeoutExpired("cmd", 300)), \
-         patch.object(schema, "spring_dir", return_value="/fake/spring"), \
+         patch.object(schema, "spring_home", return_value="/fake/spring"), \
          patch.object(schema, "spring_python", return_value="/usr/bin/python3"):
         result = server.check_data_gaps(begin="20260817", timeout_seconds=300)
     assert result["ok"] is False

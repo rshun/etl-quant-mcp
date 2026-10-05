@@ -1,7 +1,7 @@
 # 修改记录:
 #   2026-08-19  Claude  新建：自省 spring 的 argparse 定义并据此构造/校验 argv
 #   2026-08-19  Claude  新增 split_range：按自然月/年分片，供断点续跑
-#   2026-10-04  Claude  安装包部署时直接调用 spring-* 命令(_command_prefix)，cwd 改用 spring_workdir
+#   2026-10-04  Claude  安装包部署时直接调用 spring-* 命令(_command_prefix)，cwd 改为 SPRING_HOME
 """参数自省与 argv 构造。
 
 参数 schema 不写死在本仓库，而是运行时调用 spring 的 `tools.describe_cli` 取回(ADR-4)：
@@ -61,7 +61,7 @@ def fetch_program_schema(program: str, *, refresh: bool = False,
     try:
         proc = subprocess.run(
             cmd,
-            cwd=str(schema.spring_workdir()),
+            cwd=str(schema.spring_home()),
             capture_output=True,
             text=True,
             timeout=DESCRIBE_TIMEOUT,
