@@ -484,7 +484,7 @@ sudo systemctl daemon-reload
 
 ## 十三、工具清单
 
-共暴露 13 个工具。
+共暴露 15 个工具。
 
 ### 只读类
 
@@ -494,6 +494,8 @@ sudo systemctl daemon-reload
 | `read_etl_log` | 读日志尾部，可按级别、模块、关键字过滤。 |
 | `list_etl_logs` | 有哪几天的日志，各多大、什么时候改的。 |
 | `check_data_gaps` | 哪些交易日、哪些股票缺数据。 |
+| `list_check_details` | 核对工具落盘的异常明细 CSV 有哪些。 |
+| `read_check_detail` | 分页读取一个异常明细 CSV，可按股票代码过滤。 |
 | `describe_etl_program` | 某个 ETL 程序当前真实的命令行参数。 |
 | `list_jobs` | 列出所有任务，`stalled` 置顶。 |
 | `get_job` | 单个任务的状态、进度、距上次输出多久。 |

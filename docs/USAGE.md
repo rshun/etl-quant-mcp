@@ -1,6 +1,6 @@
 # Usage Guide
 
-Detailed reference for all 13 MCP tools provided by **quant-etl**.
+Detailed reference for all 15 MCP tools provided by **quant-etl**.
 
 > 中文版：[USAGE.zh-CN.md](USAGE.zh-CN.md)
 > For installation, see [INSTALL.md](INSTALL.md)
@@ -14,7 +14,7 @@ Detailed reference for all 13 MCP tools provided by **quant-etl**.
 | **Execution** | `etl_import_daily` `etl_adjust` `etl_fetch_index` `etl_fill_indicators` | Yes |
 | **Job management** | `list_jobs` `get_job` `get_job_output` `cancel_job` | No (`cancel_job` terminates a process) |
 | **Logs** | `list_etl_logs` `read_etl_log` `summarize_etl_log` | No |
-| **Checking & introspection** | `check_data_gaps` `describe_etl_program` | No |
+| **Checking & introspection** | `check_data_gaps` `list_check_details` `read_check_detail` `describe_etl_program` | No |
 
 You do not need to memorise tool names — describe what you want in plain
 language and the assistant picks the tool. This guide is here so you know
@@ -32,7 +32,7 @@ Re-download 600519 for yesterday     → etl_import_daily
 
 ## 2. Concepts you need first
 
-Understand this section and the 13 tools explain themselves.
+Understand this section and the 15 tools explain themselves.
 
 ### 2.1 Job model: wait briefly, then go to the background
 
@@ -411,7 +411,7 @@ stocks are not counted as missing.
 `gap_dates` is always complete (each entry is just a few numbers).
 `missing_codes` is capped by `max_detail`; when truncated,
 `missing_codes_truncated` is true and the full detail is in the `csv_path` of the
-same entry.
+same entry; read it with `read_check_detail`.
 
 **Judge the outcome by `status`** (`complete` / `gaps_found` / `error`), never by
 the exit code — the underlying tool uses a different exit-code convention.
@@ -444,6 +444,43 @@ data in `SUSPENSION_DAILY` / `LIMIT_POOL_DAILY`.
 backfill will not block it. But DuckDB allows only one writer: if a write job
 currently holds the lock, the read-only connection cannot be opened, and the tool
 says so explicitly.
+
+---
+
+### `list_check_details`
+
+Lists the **anomaly-detail CSVs** written by spring's check tools
+(`$SPRING_HOME/csv/check_*.csv`), newest first.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `limit` | 30 | Maximum number of files listed |
+| `keyword` | all | Substring match on the file name, e.g. `stockdaily_missing` |
+
+File names look like `check_<item>_<begin>_<end>.csv` and come from
+`check_data_gaps` (`tools.check_daily`) and the other check tools. The per-stock
+CSVs exported by `etl_import_daily(print_only=true)` live in the same directory
+but are **not** anomaly details and are not listed.
+
+---
+
+### `read_check_detail`
+
+Reads one anomaly-detail CSV page by page, returning `header` and `rows`.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `name` | **required** | File name, or the `csv_path` returned by `check_data_gaps` |
+| `offset` | 0 | First row to return, counted after filtering |
+| `limit` | 200 | Rows per page, capped at 2000 |
+| `keyword` | all | Substring match on the whole row; typically a stock code |
+
+When `truncated` is true there is another page: continue from `next_offset`.
+`total_rows` counts the whole file, `matched_rows` counts rows after filtering.
+
+**Why it exists:** in an HTTP deployment the client and this service run as
+different users, so the model cannot open `csv_path` itself. Only `check_*.csv`
+inside the csv directory can be read; any other path is rejected.
 
 ---
 

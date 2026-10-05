@@ -10,6 +10,8 @@
 #                       etl_import_daily 的干跑说明（原文会诱导模型漏传 codes）
 #   2026-10-04  Claude  check_data_gaps 的子进程 cwd 改用 schema.spring_home()，
 #                       支持 spring 安装包部署
+#   2026-10-05  Claude  新增明细类 Tool：list_check_details / read_check_detail，
+#                       让模型能读到 check_data_gaps 截断后落盘的完整异常明细
 """quant-etl MCP 服务端。
 
 把 spring 的 ETL 程序以 MCP Tool 的形式暴露出来，让模型能完成闭环：
@@ -46,6 +48,7 @@ import sys
 import time
 import uuid
 
+import details as details_mod
 import logs as logs_mod
 import params
 import runner as runner_mod
@@ -629,6 +632,44 @@ def summarize_etl_log(date: str | None = None) -> dict:
         return _error(str(e))
 
 
+# ---------------------------------------------------------------- 明细类 Tool
+
+@mcp.tool()
+def list_check_details(limit: int = 30, keyword: str | None = None) -> dict:
+    """列出 spring 核对工具落盘的异常明细 CSV（$SPRING_HOME/csv/check_*.csv），最新在前。
+
+    这些文件由 check_data_gaps（tools.check_daily）等核对工具写出，
+    文件名形如 check_stockdaily_missing_<begin>_<end>.csv。keyword 按文件名子串过滤。
+    """
+    try:
+        records = details_mod.list_details(limit=limit, keyword=keyword)
+    except RuntimeError as e:          # 环境变量未配置
+        return _error(str(e))
+    return {"ok": True, "count": len(records), "details": records}
+
+
+@mcp.tool()
+def read_check_detail(
+    name: str,
+    offset: int = 0,
+    limit: int = details_mod.DEFAULT_LIMIT,
+    keyword: str | None = None,
+) -> dict:
+    """分页读取一个异常明细 CSV，返回表头与本页各行。
+
+    name 传文件名，或直接传 check_data_gaps 返回的 csv_path；
+    只允许读 csv 目录下的 check_*.csv。keyword 按整行子串过滤（如传股票代码）。
+    结果里 truncated 为真时，用 next_offset 继续翻页；单页最多 2000 行。
+    """
+    try:
+        return {"ok": True, **details_mod.read_detail(
+            name, offset=offset, limit=limit, keyword=keyword)}
+    except details_mod.DetailNotFound as e:
+        return _error(str(e), hint="用 list_check_details 看有哪些明细文件")
+    except (ValueError, RuntimeError) as e:
+        return _error(str(e))
+
+
 # ---------------------------------------------------------------- 校验类 Tool
 
 CHECK_TIMEOUT_DEFAULT = 300
@@ -657,7 +698,7 @@ def check_data_gaps(
       * `core.checks[].gap_dates` —— 哪几天缺、缺几条，喂给 begin/end；
       * `core.checks[].missing_codes` —— 具体缺哪些代码，喂给 codes。
         它受 max_detail 约束（默认 200），截断时 missing_codes_truncated 为真，
-        完整明细见同一项里的 csv_path。
+        完整明细见同一项里的 csv_path，用 read_check_detail 分页读取。
 
     以 `status` 判断结果（complete / gaps_found / error），
     **不要**用退出码——check_daily 的退出码是另一套语义。

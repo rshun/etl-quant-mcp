@@ -1,6 +1,6 @@
 # 使用手册
 
-**quant-etl** 提供的全部 13 个 MCP 工具的详细说明。
+**quant-etl** 提供的全部 15 个 MCP 工具的详细说明。
 
 > English version: [USAGE.md](USAGE.md)
 > 安装部署见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md)
@@ -14,7 +14,7 @@
 | **执行** | `etl_import_daily` `etl_adjust` `etl_fetch_index` `etl_fill_indicators` | 是 |
 | **任务管理** | `list_jobs` `get_job` `get_job_output` `cancel_job` | 否（`cancel_job` 会终止进程） |
 | **日志** | `list_etl_logs` `read_etl_log` `summarize_etl_log` | 否 |
-| **校验与自省** | `check_data_gaps` `describe_etl_program` | 否 |
+| **校验与自省** | `check_data_gaps` `list_check_details` `read_check_detail` `describe_etl_program` | 否 |
 
 你不需要记住工具名——直接用自然语言描述要做什么，助手会挑工具。本手册的价值在于
 让你知道**它能做什么、边界在哪、返回值怎么读**。
@@ -31,7 +31,7 @@
 
 ## 二、通用概念
 
-读懂这一节，13 个工具就都能看懂了。
+读懂这一节，15 个工具就都能看懂了。
 
 ### 2.1 任务模型：先等一会儿，等不到就转后台
 
@@ -376,7 +376,8 @@ queued → running → ┬→ succeeded       成功
 - `core.checks[].missing_codes` —— 具体缺哪些代码 → 喂给 `codes`
 
 `gap_dates` 总是完整的（每项只是几个数字）；`missing_codes` 受 `max_detail`
-约束，截断时 `missing_codes_truncated` 为真，完整明细见同一项里的 `csv_path`。
+约束，截断时 `missing_codes_truncated` 为真，完整明细见同一项里的 `csv_path`，
+用 `read_check_detail` 读取。
 
 **以 `status` 判断结果**（`complete` / `gaps_found` / `error`），
 不要用退出码——它转发的工具是另一套退出码语义。
@@ -402,6 +403,40 @@ spring 新增了**停牌核对 / 涨停核对 / 跌停核对**三项，它们拿
 
 **它是只读的，不进串行队列**，所以不会被正在跑的补数任务挡住。但 DuckDB 单写者——
 如果此刻有写任务持有写锁，只读连接会打不开，届时会明确报错并提示。
+
+---
+
+### `list_check_details`
+
+列出 spring 核对工具落盘的**异常明细 CSV**（`$SPRING_HOME/csv/check_*.csv`），最新在前。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `limit` | 30 | 最多列多少个 |
+| `keyword` | 全部 | 文件名子串匹配，如 `stockdaily_missing` |
+
+文件名形如 `check_<核对项>_<begin>_<end>.csv`，由 `check_data_gaps`（`tools.check_daily`）
+等核对工具写出。同目录下 `etl_import_daily(print_only=true)` 导出的逐股行情 CSV
+**不是**异常明细，不会列出。
+
+---
+
+### `read_check_detail`
+
+分页读取一个异常明细 CSV，返回 `header`（表头）与 `rows`（本页各行）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `name` | **必填** | 文件名，或直接传 `check_data_gaps` 返回的 `csv_path` |
+| `offset` | 0 | 从过滤后的第几行开始 |
+| `limit` | 200 | 本页行数，上限 2000 |
+| `keyword` | 全部 | 整行子串匹配，典型用法是传股票代码 |
+
+`truncated` 为真说明还有下一页，用返回的 `next_offset` 继续读；
+`total_rows` 是文件总行数，`matched_rows` 是过滤后的行数。
+
+**为什么需要它**：HTTP 部署下客户端与本服务分属不同用户，模型拿到 `csv_path`
+也读不了那个文件。只允许读 csv 目录下的 `check_*.csv`，传其它路径一律拒绝。
 
 ---
 

@@ -25,7 +25,7 @@ etl-quant-mcp = "server:main"
 # 以顶层模块安装，模块名很通用(server / schema / ...)：
 # 必须装进独立 venv(如 /opt/etl-quant-mcp)，不要装进系统或共用的 Python 环境
 [tool.setuptools]
-py-modules = ["server", "schema", "params", "runner", "logs"]
+py-modules = ["server", "schema", "params", "runner", "logs", "details"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

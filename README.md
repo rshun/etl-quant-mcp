@@ -97,7 +97,7 @@ stdio 会把这个约束传导成「客户端也必须是管道属主」，只�
 ```
 claude 用户  ──HTTP──▶  MCP 服务（rshun 身份常驻）──subprocess──▶  ETL ──▶  quant.db
    ↑                            ↑
-只能调 13 个 Tool          文件系统权限完全不用改
+只能调 15 个 Tool          文件系统权限完全不用改
 ```
 
 客户端能做的事**恰好等于**本服务暴露的 Tool——它拿不到 shell、拿不到任意 SQL、
@@ -120,7 +120,7 @@ claude 用户  ──HTTP──▶  MCP 服务（rshun 身份常驻）──subp
 顺带一个好处：常驻之后**任务历史跨客户端会话保留**，重启 Claude 也能用 `list_jobs`
 看到今天跑过什么。stdio 模式下服务随客户端进程退出，内存里的任务状态就没了。
 
-## Tool 一览（13 个）
+## Tool 一览（15 个）
 
 ### 执行类
 
@@ -160,7 +160,11 @@ cron 昨晚跑的那一次只能靠日志复盘。它的 `stall_suspects` 用一
 
 ### 校验与自省
 
-`check_data_gaps`、`describe_etl_program`
+`check_data_gaps`、`list_check_details`、`read_check_detail`、`describe_etl_program`
+
+`check_data_gaps` 的明细默认只带 200 条，完整明细由 spring 落盘到 `$SPRING_HOME/csv/check_*.csv`。
+HTTP 部署下客户端读不到那个文件，用 `read_check_detail` 分页读取（可直接传返回的 `csv_path`）。
+只开放 csv 目录下的 `check_*.csv`，其它路径一律拒绝。
 
 ## 补数闭环
 
@@ -168,6 +172,8 @@ cron 昨晚跑的那一次只能靠日志复盘。它的 `stall_suspects` 用一
 summarize_etl_log        # 昨晚哪个模块停在进度行了？
       ↓
 check_data_gaps          # 到底缺哪几天、哪些股票？
+      ↓
+read_check_detail        # 明细被截断时，读完整缺失清单
       ↓
 etl_import_daily(begin=…, codes=[…])   # 按缺口定向补
       ↓
@@ -246,5 +252,5 @@ python -m tools.describe_cli --all   # 在 spring 目录下运行，再把日期
 | 文档 | 内容 |
 |---|---|
 | [`docs/INSTALL.zh-CN.md`](docs/INSTALL.zh-CN.md) / [`docs/INSTALL.md`](docs/INSTALL.md) | **安装手册**：前置条件、部署步骤、配置项、故障排查 |
-| [`docs/USAGE.zh-CN.md`](docs/USAGE.zh-CN.md) / [`docs/USAGE.md`](docs/USAGE.md) | **使用手册**：13 个工具的逐个说明、典型工作流、常见误区 |
+| [`docs/USAGE.zh-CN.md`](docs/USAGE.zh-CN.md) / [`docs/USAGE.md`](docs/USAGE.md) | **使用手册**：15 个工具的逐个说明、典型工作流、常见误区 |
 | [`docs/mcp_etl_plan.md`](docs/mcp_etl_plan.md) | **开发记录**：需求背景、架构决策（ADR）、spring 侧契约、卡死检测设计、分阶段任务与变更记录 |

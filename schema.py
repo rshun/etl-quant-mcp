@@ -8,6 +8,7 @@
 #                       直接调用 spring-* 命令；源码模式行为不变
 #   2026-10-04  Claude  去掉 SPRING_DIR：cwd 统一为 SPRING_HOME(必填)，
 #                       启动方式由 SPRING_BIN_DIR / SPRING_PYTHON 二选一；残留 SPRING_DIR 报错
+#   2026-10-05  Claude  新增 spring_csv_dir()：核对类异常明细的落盘目录
 """与 spring 的跨仓契约(single source of truth)。
 
 本服务对 ETL 的内部逻辑「零知识」(ADR-5)，只需要三件事：
@@ -222,6 +223,14 @@ def spring_log_dir() -> Path:
     """
     value = _env("SPRING_LOG_DIR")
     return Path(value) if value else spring_home() / "log"
+
+
+def spring_csv_dir() -> Path:
+    """核对类异常明细 CSV 的目录：$SPRING_HOME/csv。
+
+    与 spring 的 CSV_DIR 一致(tools.check_daily / tools.check_adjust 写在运行目录下)。
+    """
+    return spring_home() / "csv"
 
 
 def jobs_dir() -> Path:

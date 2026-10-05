@@ -524,7 +524,7 @@ it creates no databases, no users, and no files outside its own directory and
 
 ## 13. Tool reference
 
-Thirteen tools are exposed.
+Fifteen tools are exposed.
 
 ### Read-only
 
@@ -534,6 +534,8 @@ Thirteen tools are exposed.
 | `read_etl_log` | Tail of a log, filterable by level, module, or keyword. |
 | `list_etl_logs` | Which days have logs, with sizes and timestamps. |
 | `check_data_gaps` | Which trading days and stocks are missing data. |
+| `list_check_details` | Which anomaly-detail CSVs the check tools have written. |
+| `read_check_detail` | One anomaly-detail CSV, paginated and filterable by stock code. |
 | `describe_etl_program` | The current command-line parameters of one ETL program. |
 | `list_jobs` | All jobs, with stalled ones first. |
 | `get_job` | One job: status, progress, seconds since last output. |

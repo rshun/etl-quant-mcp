@@ -2,6 +2,7 @@
 #   2026-08-19  Claude  新建：Tool 注册、参数闸门与任务管理的正反例
 #   2026-09-12  Claude  跟进 spring：fill_turnover 并入 etl_fill_indicators
 #   2026-10-04  Claude  子进程 cwd 改为 SPRING_HOME，桩改打 schema.spring_home
+#   2026-10-05  Claude  新增明细类 Tool：list_check_details / read_check_detail
 """server.py 的正反例。
 
 分两类测：
@@ -52,6 +53,7 @@ EXPECTED_TOOLS = {
     "etl_import_daily", "etl_adjust", "etl_fetch_index", "etl_fill_indicators",
     "list_jobs", "get_job", "get_job_output", "cancel_job",
     "list_etl_logs", "read_etl_log", "summarize_etl_log",
+    "list_check_details", "read_check_detail",
     "check_data_gaps", "describe_etl_program",
 }
 
@@ -413,6 +415,64 @@ def test_summarize_etl_log_missing_file_returns_hint(etl_log_dir):
     result = server.summarize_etl_log(date="20990101")
     assert result["ok"] is False
     assert "list_etl_logs" in result["hint"]
+
+
+# ── 明细类 Tool ───────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def spring_csv_dir(tmp_path, monkeypatch):
+    """SPRING_HOME 指向临时目录，明细落在其下 csv/，不碰真实 spring。"""
+    monkeypatch.setenv("SPRING_HOME", str(tmp_path))
+    directory = tmp_path / "csv"
+    directory.mkdir()
+    return directory
+
+
+_DETAIL_NAME = "check_stockdaily_missing_20260901_20260902.csv"
+_DETAIL_CSV = "date,code\n2026-09-01,600519.SH\n2026-09-01,000681.SZ\n"
+
+
+def test_list_check_details(spring_csv_dir):
+    """正例: 列出 csv 目录下的核对明细"""
+    (spring_csv_dir / _DETAIL_NAME).write_text(_DETAIL_CSV, encoding="utf-8-sig")
+    result = server.list_check_details()
+    assert result["ok"] is True
+    assert [d["name"] for d in result["details"]] == [_DETAIL_NAME]
+
+
+def test_read_check_detail_with_keyword(spring_csv_dir):
+    """正例: 按股票代码过滤明细"""
+    (spring_csv_dir / _DETAIL_NAME).write_text(_DETAIL_CSV, encoding="utf-8-sig")
+    result = server.read_check_detail(name=_DETAIL_NAME, keyword="600519")
+    assert result["ok"] is True
+    assert result["header"] == ["date", "code"]
+    assert result["rows"] == [["2026-09-01", "600519.SH"]]
+
+
+def test_read_check_detail_missing_file_returns_hint(spring_csv_dir):
+    """反例: 文件不存在时返回结构化错误并提示下一步"""
+    result = server.read_check_detail(name="check_nope_20260901_20260902.csv")
+    assert result["ok"] is False
+    assert "list_check_details" in result["hint"]
+
+
+def test_read_check_detail_rejects_traversal(spring_csv_dir):
+    """反例(安全): 不能借明细 Tool 读 csv 目录以外的文件"""
+    result = server.read_check_detail(name="../config/config.yaml")
+    assert result["ok"] is False
+
+
+def test_read_check_detail_doc_states_real_page_cap():
+    """正例: 说明里写的单页上限要与 details.MAX_LIMIT 一致，否则模型会按错的上限翻页"""
+    import details
+    assert f"单页最多 {details.MAX_LIMIT} 行" in _tools()["read_check_detail"].description
+
+
+def test_check_details_without_spring_home(monkeypatch):
+    """反例: SPRING_HOME 未配置时返回结构化错误，不抛裸异常"""
+    monkeypatch.delenv("SPRING_HOME", raising=False)
+    assert server.list_check_details()["ok"] is False
+    assert server.read_check_detail(name=_DETAIL_NAME)["ok"] is False
 
 
 # ── 分片执行（M4）────────────────────────────────────────────────────────────
