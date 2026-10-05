@@ -55,7 +55,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 
 ```bash
 python3 -m venv /opt/etl-quant-mcp
-/opt/etl-quant-mcp/bin/pip install https://github.com/rshun/etl-quant-mcp/releases/download/v0.2.0/etl_quant_mcp-0.2.0-py3-none-any.whl
+/opt/etl-quant-mcp/bin/pip install https://github.com/rshun/etl-quant-mcp/releases/download/v0.3.0/etl_quant_mcp-0.3.0-py3-none-any.whl
 ```
 
 systemd unit 中改为 `ExecStart=/opt/etl-quant-mcp/bin/etl-quant-mcp`，其余环境变量不变。

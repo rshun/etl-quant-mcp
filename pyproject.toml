@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etl-quant-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "ETL 调度 MCP 服务：以子进程方式驱动 spring 的 ETL 程序，提供卡死检测与断点续跑"
 readme = "README.md"
 # 下限 3.10 来自 PEP 604 的 `X | Y` 联合类型注解。
